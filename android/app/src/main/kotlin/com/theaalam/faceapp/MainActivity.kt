@@ -1,4 +1,4 @@
-package com.example.face_app
+package com.theaalam.faceapp
 
 import io.flutter.embedding.android.FlutterActivity
 

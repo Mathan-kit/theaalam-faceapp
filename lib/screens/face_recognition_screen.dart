@@ -2,23 +2,37 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'dart:io';
 import 'package:camera/camera.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:intl/intl.dart';
 import 'dart:async';
-import 'package:geolocator/geolocator.dart';
+import 'package:google_fonts/google_fonts.dart';
 
 import '../config/api_config.dart';
 import '../services/ml_service.dart';
+import '../services/auth_service.dart';
 import '../theme/app_colors.dart';
 import '../utils/toast_util.dart';
+import '../widgets/app_background.dart';
+import '../widgets/custom_bottom_nav_bar.dart';
 
-import 'login_screen.dart';
 import 'staff_screen.dart';
 import 'logs_screen.dart';
 import 'settings_screen.dart';
+import 'login_screen.dart';
+
+class StaffAttendanceState {
+  DateTime? checkInTime;
+  DateTime? checkOutTime;
+  DateTime lastUpdated;
+
+  StaffAttendanceState({
+    this.checkInTime,
+    this.checkOutTime,
+    required this.lastUpdated,
+  });
+}
 
 class FaceRecognitionScreen extends StatefulWidget {
   final String token;
@@ -28,27 +42,43 @@ class FaceRecognitionScreen extends StatefulWidget {
   State<FaceRecognitionScreen> createState() => _FaceRecognitionScreenState();
 }
 
-class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with WidgetsBindingObserver, SingleTickerProviderStateMixin {
+class _FaceRecognitionScreenState extends State<FaceRecognitionScreen>
+    with WidgetsBindingObserver, TickerProviderStateMixin {
   CameraController? _cameraController;
   bool _isCameraInitialized = false;
   int _currentIndex = 0;
-  String _adminName = 'Admin';
-  String _adminRole = 'System Admin';
 
   bool _isProcessingFrame = false;
-  final FaceDetector _faceDetector = FaceDetector(options: FaceDetectorOptions(enableContours: false, enableClassification: false));
+  final FaceDetector _faceDetector = FaceDetector(
+    options: FaceDetectorOptions(
+      enableContours: false,
+      enableClassification: false,
+      performanceMode: FaceDetectorMode.fast,
+    ),
+  );
   List<Map<String, dynamic>> _authorizedEmployees = [];
-  final Map<String, DateTime> _lastAttendanceMap = {};
+  final Map<String, DateTime> _lastScanCooldownMap = {};
+  final Map<String, StaffAttendanceState> _staffDailyStatus = {};
+  String _lastTrackedDate = '';
+
   final List<Map<String, dynamic>> _recentAttendances = [];
   DateTime? _lastUnknownFaceTime;
-  bool _isCheckInTab = true;
+
   bool _isCameraActive = false;
-  bool _hasLocationAccess = false;
   Timer? _cameraTimeoutTimer;
+  Timer? _countdownTicker;
+  int _secondsRemaining = 10;
+
+  Timer? _liveClockTimer;
+  DateTime _currentTime = DateTime.now();
+
   Map<String, dynamic>? _attendanceFeedback;
   Timer? _feedbackTimer;
   final ScrollController _logsScrollController = ScrollController();
   late AnimationController _scannerAnimController;
+  late AnimationController _fingerTapController;
+  late Animation<double> _fingerTapScaleAnimation;
+  String _authToken = '';
 
   // Safe base URL helper to prevent 404 errors missing the slash
   String get safeBaseUrl {
@@ -57,124 +87,116 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
 
   @override
   void initState() {
-    super.initState();  
+    super.initState();
+    _authToken = widget.token;
     WidgetsBinding.instance.addObserver(this);
     _scannerAnimController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 2000),
     )..repeat(reverse: true);
 
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _checkLocationAccess(showMessage: true);
+    _fingerTapController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
+    )..repeat(reverse: true);
+
+    _fingerTapScaleAnimation = Tween<double>(begin: 0.92, end: 1.12).animate(
+      CurvedAnimation(parent: _fingerTapController, curve: Curves.easeInOut),
+    );
+
+    _checkAndResetDailyData();
+
+    // Start live clock updates
+    _liveClockTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (mounted) {
+        setState(() {
+          _currentTime = DateTime.now();
+        });
+        _checkAndResetDailyData();
+      }
     });
-    _loadAdminDetails();
+
     MLService().initialize();
     _loadAuthorizedEmployees();
-    _initCamera();
+    _fetchTodayAttendanceLogs();
   }
 
-  bool _isDialogShowing = false;
-
-  void _showLocationDialog({required bool isGps}) {
-    if (_isDialogShowing) return;
-    _isDialogShowing = true;
-    _setCameraActive(false);
-    
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-          backgroundColor: AppColors.surface,
-          title: const Row(
-            children: [
-              Icon(Icons.location_off_rounded, color: AppColors.error),
-              SizedBox(width: 10),
-              Text(
-                "Location Required",
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: AppColors.textPrimary),
-              ),
-            ],
-          ),
-          content: Text(
-            isGps ? "Please enable device location to mark biometric attendance." : "Location permission is denied. Please enable it in App Settings.",
-            style: const TextStyle(fontSize: 14, color: AppColors.textSecondary, height: 1.4),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                Navigator.of(context).pop();
-                _isDialogShowing = false;
-              },
-              child: const Text("Cancel", style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.w600)),
-            ),
-            ElevatedButton.icon(
-              onPressed: () async {
-                Navigator.of(context).pop();
-                _isDialogShowing = false;
-                if (isGps) {
-                  await Geolocator.openLocationSettings();
-                } else {
-                  await Geolocator.openAppSettings();
-                }
-                _checkLocationAccess(showMessage: true);
-              },
-              icon: const Icon(Icons.settings_outlined, size: 18),
-              label: Text(isGps ? "Turn On" : "Settings"),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.accent,
-                foregroundColor: Colors.white,
-                elevation: 0,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              ),
-            ),
-          ],
-        );
-      },
-    ).then((_) => _isDialogShowing = false);
+  void _checkAndResetDailyData() {
+    final today = DateFormat('yyyy-MM-dd').format(DateTime.now());
+    if (_lastTrackedDate.isNotEmpty && _lastTrackedDate != today) {
+      _staffDailyStatus.clear();
+      _lastScanCooldownMap.clear();
+      _recentAttendances.clear();
+      _fetchTodayAttendanceLogs();
+    }
+    _lastTrackedDate = today;
   }
 
-  Future<bool> _checkLocationAccess({bool showMessage = false}) async {
-    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
-    if (!serviceEnabled) {
-      if (mounted) setState(() => _hasLocationAccess = false);
-      if (showMessage && mounted) {
-        _showLocationDialog(isGps: true);
-      }
-      return false;
-    }
-    
-    LocationPermission permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
-    }
-    
-    if (permission == LocationPermission.deniedForever) {
-      if (mounted) setState(() => _hasLocationAccess = false);
-      if (showMessage && mounted) {
-        _showLocationDialog(isGps: false);
-      }
-      return false;
-    }
+  Future<String> _getAuthToken() async {
+    if (_authToken.isNotEmpty) return _authToken;
+    _authToken = await AuthService().getValidToken();
+    return _authToken;
+  }
 
-    bool hasAccess = (permission == LocationPermission.whileInUse || permission == LocationPermission.always);
-    if (mounted) {
-      setState(() {
-        _hasLocationAccess = hasAccess;
-      });
-      if (!hasAccess && showMessage) {
-        ToastUtil.showError(context, "Location permission is required to mark attendance.");
+  Future<void> _fetchTodayAttendanceLogs() async {
+    final token = await _getAuthToken();
+    if (token.isEmpty) return;
+    try {
+      final dateStr = DateFormat('yyyy-MM-dd').format(DateTime.now());
+      final response = await http.get(
+        Uri.parse('${safeBaseUrl}attendance_logs?date=$dateStr'),
+        headers: {
+          'Accept': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+      );
+
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        final resData = jsonDecode(response.body);
+        List<dynamic> logs = [];
+        if (resData['data'] is Map) {
+          final present = resData['data']['present'] ?? [];
+          final absent = resData['data']['absent'] ?? [];
+          logs = [...present, ...absent];
+        } else if (resData['data'] is List) {
+          logs = resData['data'];
+        }
+
+        for (var log in logs) {
+          final empCode = log['emp_code']?.toString() ?? '';
+          if (empCode.isEmpty) continue;
+
+          DateTime? inTime;
+          DateTime? outTime;
+
+          if (log['in_time'] != null && log['in_time'].toString().isNotEmpty) {
+            inTime = DateTime.tryParse(log['in_time'].toString());
+          }
+          if (log['out_time'] != null && log['out_time'].toString().isNotEmpty) {
+            outTime = DateTime.tryParse(log['out_time'].toString());
+          }
+
+          if (inTime != null || outTime != null) {
+            _staffDailyStatus[empCode] = StaffAttendanceState(
+              checkInTime: inTime,
+              checkOutTime: outTime,
+              lastUpdated: DateTime.now(),
+            );
+          }
+        }
       }
+    } catch (e) {
+      debugPrint("Failed to fetch today's attendance logs: $e");
     }
-    return hasAccess;
   }
 
   Future<void> _loadAuthorizedEmployees() async {
+    final token = await _getAuthToken();
+    if (token.isEmpty) return;
     try {
       final response = await http.get(
         Uri.parse('${safeBaseUrl}employees'),
-        headers: {'Accept': 'application/json', 'Authorization': 'Bearer ${widget.token}'},
+        headers: {'Accept': 'application/json', 'Authorization': 'Bearer $token'},
       );
       if (response.statusCode == 200 || response.statusCode == 201) {
         final resData = jsonDecode(response.body);
@@ -186,21 +208,11 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
             })
             .map((e) => e as Map<String, dynamic>)
             .toList();
-        
+
         debugPrint("Successfully loaded ${_authorizedEmployees.length} authorized employees into memory.");
       }
     } catch (e) {
       debugPrint("Failed to load authorized employees: $e");
-    }
-  }
-
-  Future<void> _loadAdminDetails() async {
-    final prefs = await SharedPreferences.getInstance();
-    if (mounted) {
-      setState(() {
-        _adminName = prefs.getString('admin_name') ?? 'Admin';
-        _adminRole = prefs.getString('admin_role') ?? 'System Admin';
-      });
     }
   }
 
@@ -211,21 +223,21 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
         debugPrint('No cameras available on this device');
         return;
       }
-      
+
       final frontCamera = cameras.firstWhere(
         (c) => c.lensDirection == CameraLensDirection.front,
         orElse: () => cameras.first,
       );
 
       _cameraController?.dispose();
-      
+
       CameraController controller = CameraController(
         frontCamera,
         ResolutionPreset.medium,
         enableAudio: false,
         imageFormatGroup: Platform.isAndroid ? ImageFormatGroup.nv21 : ImageFormatGroup.bgra8888,
       );
-      
+
       try {
         await controller.initialize();
       } catch (e) {
@@ -247,14 +259,6 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
       setState(() {
         _isCameraInitialized = true;
       });
-
-      if (_isCameraActive) {
-        try {
-          await _cameraController!.startImageStream(_processCameraFrame);
-        } catch (streamErr) {
-          debugPrint('Error starting image stream in _initCamera: $streamErr');
-        }
-      }
     } catch (e) {
       debugPrint('Error initializing camera: $e');
       if (mounted) {
@@ -269,7 +273,11 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _scannerAnimController.dispose();
+    _fingerTapController.dispose();
     _cameraTimeoutTimer?.cancel();
+    _countdownTicker?.cancel();
+    _liveClockTimer?.cancel();
+    _feedbackTimer?.cancel();
     _faceDetector.close();
     _cameraController?.dispose();
     _logsScrollController.dispose();
@@ -285,15 +293,13 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
       _cameraController?.stopImageStream();
       _cameraController?.dispose();
       _cameraController = null;
+      _cameraTimeoutTimer?.cancel();
+      _countdownTicker?.cancel();
       if (mounted) {
         setState(() {
           _isCameraInitialized = false;
+          _isCameraActive = false;
         });
-      }
-    } else if (state == AppLifecycleState.resumed) {
-      _checkLocationAccess(showMessage: true);
-      if (_currentIndex == 0) {
-        _initCamera();
       }
     }
   }
@@ -308,7 +314,8 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
       final camera = _cameraController!.description;
       final sensorOrientation = camera.sensorOrientation;
       final rotation = InputImageRotationValue.fromRawValue(sensorOrientation) ?? InputImageRotation.rotation270deg;
-      final format = InputImageFormatValue.fromRawValue(image.format.raw) ?? (Platform.isAndroid ? InputImageFormat.nv21 : InputImageFormat.bgra8888);
+      final format = InputImageFormatValue.fromRawValue(image.format.raw) ??
+          (Platform.isAndroid ? InputImageFormat.nv21 : InputImageFormat.bgra8888);
 
       final WriteBuffer allBytes = WriteBuffer();
       for (final Plane plane in image.planes) {
@@ -330,7 +337,7 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
       if (faces.isNotEmpty) {
         final Rect boundingBox = faces.first.boundingBox;
         final List<double>? vector = MLService().extractFaceVectorFromCameraImage(image, boundingBox);
-        
+
         if (vector != null) {
           _findMatchingEmployee(vector);
         }
@@ -339,7 +346,7 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
       debugPrint('Camera Frame Error: $e\n$stack');
     } finally {
       if (mounted) {
-        await Future.delayed(const Duration(milliseconds: 1000));
+        await Future.delayed(const Duration(milliseconds: 600));
         _isProcessingFrame = false;
       }
     }
@@ -348,6 +355,7 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
   void _findMatchingEmployee(List<double> vector) {
     if (_authorizedEmployees.isEmpty) {
       debugPrint("Warning: No authorized employees loaded.");
+      return;
     }
 
     double minDistance = double.maxFinite;
@@ -366,10 +374,10 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
         } else {
           continue;
         }
-        
+
         List<double> storedVector = parsed.map((e) => (e as num).toDouble()).toList();
         double distance = MLService().calculateDistance(vector, storedVector);
-        
+
         if (distance < minDistance) {
           minDistance = distance;
           matchedEmployee = employee;
@@ -380,7 +388,7 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
     }
 
     if (minDistance < 0.8 && matchedEmployee != null) {
-      _markAttendance(matchedEmployee, vector);
+      _processDynamicAttendance(matchedEmployee, vector);
     } else {
       if (_lastUnknownFaceTime == null || DateTime.now().difference(_lastUnknownFaceTime!).inSeconds > 3) {
         _lastUnknownFaceTime = DateTime.now();
@@ -391,58 +399,107 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
     }
   }
 
-  Future<void> _markAttendance(Map<String, dynamic> employee, List<double> vector) async {
+  Future<void> _processDynamicAttendance(Map<String, dynamic> employee, List<double> vector) async {
     final empCode = employee['emp_code']?.toString() ?? '';
+    final empName = employee['employee_name'] ?? 'Employee';
     if (empCode.isEmpty) return;
 
-    final lastTime = _lastAttendanceMap[empCode];
-    if (lastTime != null && DateTime.now().difference(lastTime).inSeconds < 60) {
-      return; 
-    }
-    
-    _lastAttendanceMap[empCode] = DateTime.now();
+    _checkAndResetDailyData();
 
-    Position? currentPosition;
-    try {
-      currentPosition = await _determinePosition();
-    } catch (e) {
-      debugPrint("Location error: $e");
+    // Prevent rapid duplicate hits within 10s cooldown
+    final lastTime = _lastScanCooldownMap[empCode];
+    if (lastTime != null && DateTime.now().difference(lastTime).inSeconds < 10) {
+      return;
     }
+    _lastScanCooldownMap[empCode] = DateTime.now();
 
-    if (currentPosition == null) {
-      if (mounted) {
-        ToastUtil.showError(context, "Location is mandatory for attendance. Please enable GPS.");
-        await _setCameraActive(false);
-      }
-      _lastAttendanceMap.remove(empCode);
+    final staffState = _staffDailyStatus[empCode];
+
+    // CASE 1: Employee has not checked in today -> Log Check-In
+    if (staffState == null || staffState.checkInTime == null) {
+      await _submitAttendance(
+        employee: employee,
+        vector: vector,
+        type: 'check_in',
+        isCheckIn: true,
+      );
       return;
     }
 
-    try {
-      String latLanStr = '${currentPosition.latitude},${currentPosition.longitude}';
+    // CASE 2: Employee has checked in, but has not checked out yet
+    if (staffState.checkOutTime == null) {
+      final elapsed = DateTime.now().difference(staffState.checkInTime!);
+      final elapsedMinutes = elapsed.inMinutes;
 
+      // 30-Minute Gap Check
+      if (elapsedMinutes < 30) {
+        final remainingMins = 30 - elapsedMinutes;
+        final inTimeStr = DateFormat('hh:mm a').format(staffState.checkInTime!);
+        _showFeedback(
+          statusType: FeedbackType.info,
+          name: empName,
+          msg: "Already Checked In at $inTimeStr\nCheck-Out available in $remainingMins min(s)",
+          time: staffState.checkInTime!,
+        );
+        return;
+      }
+
+      // 30+ Minutes Passed -> Log Check-Out
+      await _submitAttendance(
+        employee: employee,
+        vector: vector,
+        type: 'check_out',
+        isCheckIn: false,
+      );
+      return;
+    }
+
+    // CASE 3: Employee has already completed both Check-In and Check-Out today
+    final outTimeStr = DateFormat('hh:mm a').format(staffState.checkOutTime!);
+    _showFeedback(
+      statusType: FeedbackType.info,
+      name: empName,
+      msg: "Already Checked Out today at $outTimeStr",
+      time: staffState.checkOutTime!,
+    );
+  }
+
+  Future<void> _submitAttendance({
+    required Map<String, dynamic> employee,
+    required List<double> vector,
+    required String type,
+    required bool isCheckIn,
+  }) async {
+    final empCode = employee['emp_code']?.toString() ?? '';
+    final empName = employee['employee_name'] ?? 'Employee';
+
+    final token = await _getAuthToken();
+
+    try {
       final response = await http.post(
         Uri.parse('${safeBaseUrl}daily_emp_attendance'),
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'application/json',
-          'Authorization': 'Bearer ${widget.token}',
+          'Authorization': 'Bearer $token',
         },
         body: jsonEncode({
           'emp_code': empCode,
-          'type': _isCheckInTab ? 'check_in' : 'check_out',
+          'type': type,
           'face_vector': jsonEncode(vector),
-          'lat_lan': latLanStr,
+          'lat_lan': '',
         }),
       );
 
-      String msg = "Failed to log attendance";
-      bool isSuccess = false;
+      String msg = isCheckIn ? "Check In Successful" : "Check Out Successful";
+      FeedbackType statusType = isCheckIn ? FeedbackType.checkInSuccess : FeedbackType.checkOutSuccess;
       DateTime logTime = DateTime.now();
-      
+
       try {
         final resData = jsonDecode(response.body);
-        if (resData['message'] != null) msg = resData['message'];
+        if (resData['message'] != null) {
+          msg = resData['message'];
+        }
 
         if (resData['data'] != null) {
           String? timeStr = resData['data']['out_time'] ?? resData['data']['in_time'];
@@ -460,27 +517,66 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
           } catch (_) {}
         }
 
-        if (resData['type'] == 'Duplicate' || resData['type'] == 'Error') {
-          isSuccess = false; 
+        if (resData['type'] == 'Duplicate') {
+          statusType = FeedbackType.info;
+          if (isCheckIn) {
+            msg = "Already Checked In today at ${DateFormat('hh:mm a').format(logTime)}";
+          } else {
+            msg = "Already Checked Out today at ${DateFormat('hh:mm a').format(logTime)}";
+          }
+        } else if (resData['type'] == 'Error') {
+          statusType = FeedbackType.warning;
         } else if (resData['success'] != null) {
-          isSuccess = resData['success'] == true;
+          statusType = resData['success'] == true
+              ? (isCheckIn ? FeedbackType.checkInSuccess : FeedbackType.checkOutSuccess)
+              : FeedbackType.warning;
         } else {
-          isSuccess = response.statusCode == 200 || response.statusCode == 201;
+          statusType = (response.statusCode == 200 || response.statusCode == 201)
+              ? (isCheckIn ? FeedbackType.checkInSuccess : FeedbackType.checkOutSuccess)
+              : FeedbackType.warning;
         }
       } catch (_) {
-        isSuccess = response.statusCode == 200 || response.statusCode == 201;
+        statusType = (response.statusCode == 200 || response.statusCode == 201)
+            ? (isCheckIn ? FeedbackType.checkInSuccess : FeedbackType.checkOutSuccess)
+            : FeedbackType.warning;
+      }
+
+      // Update local daily status
+      if (statusType == FeedbackType.checkInSuccess ||
+          statusType == FeedbackType.checkOutSuccess ||
+          statusType == FeedbackType.info) {
+        if (_staffDailyStatus[empCode] == null) {
+          _staffDailyStatus[empCode] = StaffAttendanceState(
+            checkInTime: isCheckIn ? logTime : null,
+            checkOutTime: !isCheckIn ? logTime : null,
+            lastUpdated: DateTime.now(),
+          );
+        } else {
+          if (isCheckIn) {
+            _staffDailyStatus[empCode]!.checkInTime = logTime;
+          } else {
+            _staffDailyStatus[empCode]!.checkOutTime = logTime;
+          }
+        }
       }
 
       _cameraTimeoutTimer?.cancel();
+      _countdownTicker?.cancel();
 
       if (mounted) {
-        _showFeedback(isSuccess, employee['employee_name'] ?? 'Employee', msg, logTime);
+        _showFeedback(
+          statusType: statusType,
+          name: empName,
+          msg: msg,
+          time: logTime,
+        );
         setState(() {
           _recentAttendances.insert(0, {
-            'name': employee['employee_name'] ?? 'Employee',
+            'name': empName,
             'message': msg,
             'time': logTime,
-            'isSuccess': isSuccess,
+            'statusType': statusType,
+            'isCheckIn': isCheckIn,
           });
           if (_recentAttendances.length > 20) _recentAttendances.removeLast();
         });
@@ -490,11 +586,16 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
     }
   }
 
-  void _showFeedback(bool isSuccess, String name, String msg, DateTime time) {
+  void _showFeedback({
+    required FeedbackType statusType,
+    required String name,
+    required String msg,
+    required DateTime time,
+  }) {
     _setCameraActive(false);
     setState(() {
       _attendanceFeedback = {
-        'isSuccess': isSuccess,
+        'statusType': statusType,
         'name': name,
         'msg': msg,
         'time': time,
@@ -540,6 +641,26 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
 
   void _startCameraTimeout() {
     _cameraTimeoutTimer?.cancel();
+    _countdownTicker?.cancel();
+
+    setState(() {
+      _secondsRemaining = 10;
+    });
+
+    _countdownTicker = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      if (_secondsRemaining > 1) {
+        setState(() {
+          _secondsRemaining--;
+        });
+      } else {
+        timer.cancel();
+      }
+    });
+
     _cameraTimeoutTimer = Timer(const Duration(seconds: 10), () {
       if (mounted && _isCameraActive) {
         _setCameraActive(false);
@@ -547,31 +668,30 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
     });
   }
 
-  Future<Position?> _determinePosition() async {
-    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
-    if (!serviceEnabled) return null;
-
-    LocationPermission permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
-      if (permission == LocationPermission.denied) return null;
+  void _onTapScanCircle() async {
+    if (_attendanceFeedback != null) {
+      _feedbackTimer?.cancel();
+      setState(() {
+        _attendanceFeedback = null;
+      });
     }
-    
-    if (permission == LocationPermission.deniedForever) return null;
-
-    try {
-      return await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high, 
-        timeLimit: const Duration(seconds: 5)
-      );
-    } catch (e) {
-      debugPrint("Error getting location: $e");
-      return null;
+    if (_isCameraActive) {
+      _startCameraTimeout();
+    } else {
+      await _setCameraActive(true);
+      _startCameraTimeout();
     }
   }
 
   Widget _buildHomeBody(ThemeData theme) {
-    final Color activeColor = _isCheckInTab ? AppColors.success : AppColors.error;
+    final String timeString = DateFormat('hh:mm:ss a').format(_currentTime);
+    final String dateString = DateFormat('EEEE, dd MMM yyyy').format(_currentTime);
+    const Color activeThemeColor = AppColors.accent;
+
+    final bool showCameraView = _isCameraActive &&
+        _isCameraInitialized &&
+        _cameraController != null &&
+        _cameraController!.value.isInitialized;
 
     return SafeArea(
       child: SingleChildScrollView(
@@ -579,35 +699,17 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Top Bar
+            // Top App Bar
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Row(
                   children: [
-                    Container(
-                      width: 38,
-                      height: 38,
-                      padding: const EdgeInsets.all(6),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        shape: BoxShape.circle,
-                        border: Border.all(color: AppColors.border),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withValues(alpha: 0.04),
-                            blurRadius: 8,
-                          ),
-                        ],
-                      ),
-                      child: Image.asset(
-                        'assets/images/logo.png',
-                        errorBuilder: (context, error, stackTrace) => const Icon(
-                          Icons.fingerprint,
-                          color: AppColors.accent,
-                          size: 20,
-                        ),
-                      ),
+                    Image.asset(
+                      'assets/images/logo.png',
+                      width: 40,
+                      height: 40,
+                      fit: BoxFit.contain,
                     ),
                     const SizedBox(width: 10),
                     Column(
@@ -615,7 +717,8 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
                       children: [
                         Text(
                           'THE AALAM',
-                          style: theme.textTheme.titleMedium?.copyWith(
+                          style: GoogleFonts.outfit(
+                            fontSize: 16,
                             fontWeight: FontWeight.w800,
                             letterSpacing: 0.5,
                             color: AppColors.textPrimary,
@@ -623,273 +726,183 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
                         ),
                         Text(
                           'Workforce Attendance',
-                          style: theme.textTheme.labelSmall?.copyWith(
+                          style: GoogleFonts.outfit(
                             color: AppColors.textSecondary,
                             fontSize: 11,
+                            fontWeight: FontWeight.w500,
                           ),
                         ),
                       ],
                     ),
                   ],
                 ),
-                
-                // Right controls: Location status pill + Admin avatar
-                Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                      decoration: BoxDecoration(
-                        color: _hasLocationAccess ? AppColors.successLight : AppColors.errorLight,
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(
-                          color: _hasLocationAccess ? AppColors.success.withValues(alpha: 0.3) : AppColors.error.withValues(alpha: 0.3),
-                        ),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            _hasLocationAccess ? Icons.location_on_rounded : Icons.location_off_rounded,
-                            size: 13,
-                            color: _hasLocationAccess ? AppColors.success : AppColors.error,
-                          ),
-                          const SizedBox(width: 4),
-                          Text(
-                            _hasLocationAccess ? "GPS Ready" : "No GPS",
-                            style: TextStyle(
-                              color: _hasLocationAccess ? AppColors.success : AppColors.error,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 10),
 
-                    // Admin avatar menu
-                    PopupMenuButton<String>(
-                      offset: const Offset(0, 48),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                      color: AppColors.surface,
-                      elevation: 8,
-                      onSelected: (value) async {
-                        if (value == 'logout') {
-                          final prefs = await SharedPreferences.getInstance();
-                          await prefs.remove('auth_token');
-                          if (mounted) {
-                            Navigator.pushAndRemoveUntil(
-                              context,
-                              MaterialPageRoute(builder: (context) => const LoginScreen()),
-                              (route) => false,
-                            );
-                          }
-                        }
-                      },
-                      itemBuilder: (context) => [
-                        PopupMenuItem<String>(
-                          enabled: false,
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(_adminName, style: const TextStyle(fontWeight: FontWeight.w700, color: AppColors.textPrimary, fontSize: 15)),
-                              const SizedBox(height: 2),
-                              Text(_adminRole, style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
-                            ],
-                          ),
-                        ),
-                        const PopupMenuDivider(),
-                        const PopupMenuItem<String>(
-                          value: 'logout',
-                          child: Row(
-                            children: [
-                              Icon(Icons.logout_rounded, color: AppColors.error, size: 18),
-                              SizedBox(width: 10),
-                              Text('Logout', style: TextStyle(color: AppColors.error, fontWeight: FontWeight.w600, fontSize: 13)),
-                            ],
-                          ),
-                        ),
-                      ],
-                      child: Container(
-                        width: 36,
-                        height: 36,
+                // Live Clock / Live Badge
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: AppColors.surface,
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: AppColors.border),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        width: 7,
+                        height: 7,
                         decoration: BoxDecoration(
-                          color: AppColors.accentLight,
+                          color: _isCameraActive ? AppColors.success : AppColors.textMuted,
                           shape: BoxShape.circle,
-                          border: Border.all(color: AppColors.accent.withValues(alpha: 0.3), width: 1.2),
-                        ),
-                        child: Center(
-                          child: Text(
-                            _adminName.isNotEmpty ? _adminName[0].toUpperCase() : 'A',
-                            style: const TextStyle(
-                              color: AppColors.accent,
-                              fontWeight: FontWeight.w700,
-                              fontSize: 15,
-                            ),
-                          ),
                         ),
                       ),
-                    ),
-                  ],
+                      const SizedBox(width: 6),
+                      Text(
+                        _isCameraActive ? 'Scanning' : 'Standby',
+                        style: GoogleFonts.outfit(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                          color: _isCameraActive ? AppColors.success : AppColors.textSecondary,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ],
             ),
-            const SizedBox(height: 20),
-            
-            // Segmented Tab Switcher (Check In / Check Out)
+            const SizedBox(height: 18),
+
+            // Dynamic Attendance System Card
             Container(
-              height: 48,
-              padding: const EdgeInsets.all(4),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
               decoration: BoxDecoration(
-                color: AppColors.surfaceSubtle,
-                borderRadius: BorderRadius.circular(14),
+                color: AppColors.surface,
+                borderRadius: BorderRadius.circular(16),
                 border: Border.all(color: AppColors.border),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.03),
+                    blurRadius: 16,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
               ),
               child: Row(
                 children: [
-                  Expanded(
-                    child: GestureDetector(
-                      onTap: () async {
-                        bool hasAccess = await _checkLocationAccess(showMessage: true);
-                        if (!hasAccess) return;
-
-                        setState(() => _isCheckInTab = true);
-                        await _setCameraActive(true);
-                        _startCameraTimeout();
-                        _lastAttendanceMap.clear();
-                      },
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 200),
-                        decoration: BoxDecoration(
-                          color: _isCheckInTab ? AppColors.success : Colors.transparent,
-                          borderRadius: BorderRadius.circular(10),
-                          boxShadow: _isCheckInTab
-                              ? [
-                                  BoxShadow(
-                                    color: AppColors.success.withValues(alpha: 0.25),
-                                    blurRadius: 8,
-                                    offset: const Offset(0, 2),
-                                  ),
-                                ]
-                              : null,
-                        ),
-                        alignment: Alignment.center,
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(
-                              Icons.login_rounded,
-                              size: 16,
-                              color: _isCheckInTab ? Colors.white : AppColors.textSecondary,
-                            ),
-                            const SizedBox(width: 6),
-                            Text(
-                              'Check In',
-                              style: TextStyle(
-                                fontWeight: FontWeight.w700,
-                                fontSize: 13,
-                                color: _isCheckInTab ? Colors.white : AppColors.textSecondary,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
+                  Container(
+                    width: 44,
+                    height: 44,
+                    decoration: BoxDecoration(
+                      color: AppColors.accent.withValues(alpha: 0.1),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.fingerprint_rounded,
+                      color: AppColors.accent,
+                      size: 24,
                     ),
                   ),
+                  const SizedBox(width: 14),
                   Expanded(
-                    child: GestureDetector(
-                      onTap: () async {
-                        bool hasAccess = await _checkLocationAccess(showMessage: true);
-                        if (!hasAccess) return;
-
-                        setState(() => _isCheckInTab = false);
-                        await _setCameraActive(true);
-                        _startCameraTimeout();
-                        _lastAttendanceMap.clear();
-                      },
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 200),
-                        decoration: BoxDecoration(
-                          color: !_isCheckInTab ? AppColors.error : Colors.transparent,
-                          borderRadius: BorderRadius.circular(10),
-                          boxShadow: !_isCheckInTab
-                              ? [
-                                  BoxShadow(
-                                    color: AppColors.error.withValues(alpha: 0.25),
-                                    blurRadius: 8,
-                                    offset: const Offset(0, 2),
-                                  ),
-                                ]
-                              : null,
-                        ),
-                        alignment: Alignment.center,
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
-                            Icon(
-                              Icons.logout_rounded,
-                              size: 16,
-                              color: !_isCheckInTab ? Colors.white : AppColors.textSecondary,
-                            ),
-                            const SizedBox(width: 6),
                             Text(
-                              'Check Out',
-                              style: TextStyle(
+                              'Attendance System Active',
+                              style: GoogleFonts.outfit(
+                                fontWeight: FontWeight.w700,
+                                fontSize: 14,
+                                color: AppColors.textPrimary,
+                              ),
+                            ),
+                            Text(
+                              timeString,
+                              style: GoogleFonts.outfit(
                                 fontWeight: FontWeight.w700,
                                 fontSize: 13,
-                                color: !_isCheckInTab ? Colors.white : AppColors.textSecondary,
+                                color: AppColors.accent,
                               ),
                             ),
                           ],
                         ),
-                      ),
+                        const SizedBox(height: 2),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              'Auto Check-In & Check-Out (30m Interval)',
+                              style: GoogleFonts.outfit(
+                                fontSize: 11,
+                                color: AppColors.textSecondary,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                            Text(
+                              dateString,
+                              style: GoogleFonts.outfit(
+                                fontSize: 10,
+                                color: AppColors.textMuted,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
                     ),
                   ),
                 ],
               ),
             ),
             const SizedBox(height: 24),
-            
-            // Biometric Camera Viewfinder
-            Center(
-              child: Stack(
-                alignment: Alignment.center,
-                children: [
-                  // Outer Ambient Glow
-                  Container(
-                    height: 270,
-                    width: 270,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      boxShadow: [
-                        BoxShadow(
-                          color: activeColor.withValues(alpha: _isCameraActive ? 0.2 : 0.06),
-                          blurRadius: 36,
-                          spreadRadius: 4,
-                          offset: const Offset(0, 8),
-                        ),
-                      ],
-                    ),
-                  ),
 
-                  // Main Circular Aperture
-                  Container(
-                    height: 260,
-                    width: 260,
-                    decoration: BoxDecoration(
-                      color: _isCameraActive ? const Color(0xFF090D16) : AppColors.surface,
-                      shape: BoxShape.circle,
-                      border: Border.all(
-                        color: _isCameraActive ? activeColor.withValues(alpha: 0.8) : AppColors.border,
-                        width: 2.5,
+            // Center Circular Viewfinder (Tap Hand to Scan)
+            Center(
+              child: GestureDetector(
+                onTap: _onTapScanCircle,
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    // Outer Glow
+                    Container(
+                      height: 270,
+                      width: 270,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        boxShadow: [
+                          BoxShadow(
+                            color: activeThemeColor.withValues(
+                              alpha: _isCameraActive ? 0.25 : 0.06,
+                            ),
+                            blurRadius: 36,
+                            spreadRadius: 4,
+                            offset: const Offset(0, 8),
+                          ),
+                        ],
                       ),
                     ),
-                    clipBehavior: Clip.antiAlias,
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        if (_isCameraActive)
-                          if (_isCameraInitialized && _cameraController != null && _cameraController!.value.isInitialized)
+
+                    // Main Circular Aperture
+                    Container(
+                      height: 260,
+                      width: 260,
+                      decoration: BoxDecoration(
+                        color: showCameraView ? const Color(0xFF090D16) : AppColors.surface,
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: _isCameraActive ? activeThemeColor : AppColors.border,
+                          width: 2.5,
+                        ),
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          if (_attendanceFeedback != null)
+                            _buildAnimatedFeedback()
+                          else if (showCameraView)
                             SizedBox.expand(
                               child: FittedBox(
                                 fit: BoxFit.cover,
@@ -902,65 +915,118 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
                             )
                           else
                             Center(
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2.5,
-                                color: activeColor,
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  AnimatedBuilder(
+                                    animation: _fingerTapController,
+                                    builder: (context, child) {
+                                      return Transform.scale(
+                                        scale: _fingerTapScaleAnimation.value,
+                                        child: Container(
+                                          padding: const EdgeInsets.all(18),
+                                          decoration: BoxDecoration(
+                                            color: activeThemeColor.withValues(alpha: 0.12),
+                                            shape: BoxShape.circle,
+                                            boxShadow: [
+                                              BoxShadow(
+                                                color: activeThemeColor.withValues(
+                                                  alpha: 0.25 * _fingerTapController.value,
+                                                ),
+                                                blurRadius: 18 * _fingerTapController.value + 4,
+                                                spreadRadius: 3 * _fingerTapController.value,
+                                              ),
+                                            ],
+                                          ),
+                                          child: const Icon(
+                                            Icons.touch_app_rounded,
+                                            size: 56,
+                                            color: activeThemeColor,
+                                          ),
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                  const SizedBox(height: 14),
+                                  Text(
+                                    'Tap Circle to Scan',
+                                    style: GoogleFonts.outfit(
+                                      color: AppColors.textPrimary,
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    '30-min gap for Check-Out',
+                                    style: GoogleFonts.outfit(
+                                      color: AppColors.textMuted,
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                ],
                               ),
-                            )
-                        else if (_attendanceFeedback != null)
-                          _buildAnimatedFeedback()
-                        else
-                          Center(
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Container(
-                                  padding: const EdgeInsets.all(16),
-                                  decoration: BoxDecoration(
-                                    color: activeColor.withValues(alpha: 0.08),
-                                    shape: BoxShape.circle,
-                                  ),
-                                  child: Icon(
-                                    Icons.face_retouching_natural_rounded,
-                                    size: 56,
-                                    color: activeColor,
-                                  ),
-                                ),
-                                const SizedBox(height: 12),
-                                Text(
-                                  'Tap Check In to Scan',
-                                  style: TextStyle(
-                                    color: AppColors.textSecondary,
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                              ],
                             ),
-                          ),
-                          
-                        // Futuristic AI Reticle Overlay
-                        if (_isCameraActive)
-                          AnimatedBuilder(
-                            animation: _scannerAnimController,
-                            builder: (context, child) {
-                              return CustomPaint(
-                                painter: _AiScannerReticlePainter(
-                                  color: activeColor,
-                                  progress: _scannerAnimController.value,
+
+                          // Futuristic AI Reticle Overlay (Only when camera is actively streaming)
+                          if (showCameraView)
+                            AnimatedBuilder(
+                              animation: _scannerAnimController,
+                              builder: (context, child) {
+                                return CustomPaint(
+                                  painter: _AiScannerReticlePainter(
+                                    color: activeThemeColor,
+                                    progress: _scannerAnimController.value,
+                                  ),
+                                );
+                              },
+                            ),
+
+                          // 10s Timer Pill Badge inside viewfinder top
+                          if (_isCameraActive && _attendanceFeedback == null)
+                            Positioned(
+                              top: 14,
+                              child: Center(
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                  decoration: BoxDecoration(
+                                    color: Colors.black.withValues(alpha: 0.65),
+                                    borderRadius: BorderRadius.circular(12),
+                                    border: Border.all(color: Colors.white24, width: 0.8),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      const Icon(
+                                        Icons.timer_outlined,
+                                        size: 12,
+                                        color: activeThemeColor,
+                                      ),
+                                      const SizedBox(width: 4),
+                                      Text(
+                                        '${_secondsRemaining}s',
+                                        style: GoogleFonts.outfit(
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w700,
+                                          color: Colors.white,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
                                 ),
-                              );
-                            },
-                          ),
-                      ],
+                              ),
+                            ),
+                        ],
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
             const SizedBox(height: 18),
-            
-            // Status Text & Pulse
+
+            // Status Text & Instructions
             if (_isCameraActive)
               Column(
                 children: [
@@ -970,16 +1036,16 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
                       Container(
                         width: 8,
                         height: 8,
-                        decoration: BoxDecoration(
-                          color: activeColor,
+                        decoration: const BoxDecoration(
+                          color: activeThemeColor,
                           shape: BoxShape.circle,
                         ),
                       ),
                       const SizedBox(width: 8),
                       Text(
-                        'Scanning Biometric Features...',
+                        'Scanning Face Biometrics...',
                         style: theme.textTheme.titleSmall?.copyWith(
-                          color: activeColor,
+                          color: activeThemeColor,
                           fontWeight: FontWeight.w700,
                         ),
                       ),
@@ -987,7 +1053,7 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    'Position face within the reticle frame',
+                    'Position face in front of the camera',
                     style: theme.textTheme.bodySmall?.copyWith(
                       color: AppColors.textSecondary,
                       fontSize: 12,
@@ -997,18 +1063,30 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
               )
             else
               Center(
-                child: Text(
-                  'Ready to Mark Attendance',
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: AppColors.textSecondary,
-                    fontWeight: FontWeight.w500,
-                  ),
+                child: Column(
+                  children: [
+                    Text(
+                      'Ready to Scan',
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        color: AppColors.textPrimary,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Tap the circle above to start 10s face scan',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: AppColors.textMuted,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
                 ),
               ),
-            
+
             const SizedBox(height: 24),
-            
-            // Recent Attendance Stream Section
+
+            // Recent Attendance Activity Stream Section
             Container(
               decoration: BoxDecoration(
                 color: AppColors.surface,
@@ -1023,14 +1101,14 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       Text(
-                        'Recent Activity',
+                        'Today\'s Activity',
                         style: theme.textTheme.titleMedium?.copyWith(
                           fontWeight: FontWeight.w700,
                           color: AppColors.textPrimary,
                         ),
                       ),
                       Text(
-                        'Today',
+                        'Auto-resets daily',
                         style: theme.textTheme.labelSmall?.copyWith(
                           color: AppColors.textMuted,
                           fontWeight: FontWeight.w600,
@@ -1040,11 +1118,11 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
                   ),
                   const SizedBox(height: 12),
                   if (_recentAttendances.isEmpty)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 24.0),
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 24.0),
                       child: Center(
                         child: Text(
-                          "No recent attendance logs recorded yet.",
+                          "No recent attendance punches recorded yet today.",
                           style: TextStyle(color: AppColors.textMuted, fontSize: 13),
                         ),
                       ),
@@ -1058,9 +1136,30 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
                       itemBuilder: (context, index) {
                         final log = _recentAttendances[index];
                         final timeStr = DateFormat('hh:mm a').format(log['time'] as DateTime);
-                        final bool isSuccess = log['isSuccess'] ?? true;
+                        final FeedbackType statusType = log['statusType'] ?? FeedbackType.checkInSuccess;
                         final String msg = log['message']?.toString() ?? '';
-                        final bool isCheckIn = !msg.toLowerCase().contains('out');
+
+                        Color itemColor;
+                        IconData itemIcon;
+
+                        switch (statusType) {
+                          case FeedbackType.checkInSuccess:
+                            itemColor = AppColors.success; // Green for Check In
+                            itemIcon = Icons.login_rounded;
+                            break;
+                          case FeedbackType.checkOutSuccess:
+                            itemColor = AppColors.error; // Red for Check Out
+                            itemIcon = Icons.logout_rounded;
+                            break;
+                          case FeedbackType.info:
+                            itemColor = const Color(0xFF0EA5E9); // Cyan / Info
+                            itemIcon = Icons.info_outline_rounded;
+                            break;
+                          case FeedbackType.warning:
+                            itemColor = AppColors.warning;
+                            itemIcon = Icons.warning_amber_rounded;
+                            break;
+                        }
 
                         return Row(
                           children: [
@@ -1068,19 +1167,13 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
                               width: 32,
                               height: 32,
                               decoration: BoxDecoration(
-                                color: isSuccess
-                                    ? (isCheckIn ? AppColors.successLight : AppColors.errorLight)
-                                    : AppColors.warningLight,
+                                color: itemColor.withValues(alpha: 0.12),
                                 shape: BoxShape.circle,
                               ),
                               child: Icon(
-                                isSuccess
-                                    ? (isCheckIn ? Icons.login_rounded : Icons.logout_rounded)
-                                    : Icons.warning_amber_rounded,
+                                itemIcon,
                                 size: 16,
-                                color: isSuccess
-                                    ? (isCheckIn ? AppColors.success : AppColors.error)
-                                    : AppColors.warning,
+                                color: itemColor,
                               ),
                             ),
                             const SizedBox(width: 12),
@@ -1108,10 +1201,10 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
                             ),
                             Text(
                               timeStr,
-                              style: const TextStyle(
-                                color: AppColors.textSecondary,
+                              style: TextStyle(
+                                color: itemColor,
                                 fontSize: 12,
-                                fontWeight: FontWeight.w600,
+                                fontWeight: FontWeight.w700,
                               ),
                             ),
                           ],
@@ -1134,85 +1227,100 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
 
     Widget body;
     if (_currentIndex == 1) {
-      body = LogsScreen(token: widget.token);
+      body = LogsScreen(token: _authToken);
     } else if (_currentIndex == 2) {
-      body = StaffScreen(token: widget.token);
+      body = StaffScreen(token: _authToken);
     } else if (_currentIndex == 3) {
       body = const SettingsScreen();
     } else {
       body = _buildHomeBody(theme);
     }
 
-    return Scaffold(
-      backgroundColor: AppColors.background,
-      body: body,
-      bottomNavigationBar: Container(
-        decoration: BoxDecoration(
-          color: AppColors.surface,
-          border: const Border(top: BorderSide(color: AppColors.border, width: 1)),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.03),
-              blurRadius: 16,
-              offset: const Offset(0, -4),
-            ),
-          ],
+    return AppBackground(
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        extendBody: true,
+        body: Padding(
+          padding: const EdgeInsets.only(bottom: 76.0),
+          child: body,
         ),
-        child: NavigationBar(
+        bottomNavigationBar: CustomBottomNavBar(
           selectedIndex: _currentIndex,
-          backgroundColor: AppColors.surface,
-          surfaceTintColor: Colors.transparent,
-          indicatorColor: AppColors.accentLight,
-          elevation: 0,
-          onDestinationSelected: (index) {
+          onItemSelected: (index) async {
+            if (index != 0) {
+              if (_authToken.isEmpty) {
+                _authToken = await AuthService().getValidToken();
+              }
+              if (_authToken.isEmpty) {
+                if (!mounted) return;
+                // Not authenticated as Admin -> Prompt Login Screen!
+                final dynamic result = await Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => const LoginScreen(isModal: true),
+                  ),
+                );
+                if (result != null && result is String && result.isNotEmpty) {
+                  setState(() {
+                    _authToken = result;
+                  });
+                  _loadAuthorizedEmployees();
+                  _fetchTodayAttendanceLogs();
+                } else {
+                  // User cancelled / went back without logging in
+                  return;
+                }
+              }
+            }
+
             if (_currentIndex == 0 && index != 0) {
+              _cameraController?.stopImageStream();
               _cameraController?.dispose();
               _cameraController = null;
               _isCameraInitialized = false;
               _isCameraActive = false;
               _cameraTimeoutTimer?.cancel();
+              _countdownTicker?.cancel();
             } else if (_currentIndex != 0 && index == 0) {
               _loadAuthorizedEmployees();
-              _lastAttendanceMap.clear();
-              _initCamera();
+              _fetchTodayAttendanceLogs();
             }
             setState(() {
               _currentIndex = index;
             });
           },
-          destinations: const [
-            NavigationDestination(
-              icon: Icon(Icons.home_outlined, color: AppColors.textSecondary),
-              selectedIcon: Icon(Icons.home_rounded, color: AppColors.accent),
-              label: 'Home',
-            ),
-            NavigationDestination(
-              icon: Icon(Icons.receipt_long_outlined, color: AppColors.textSecondary),
-              selectedIcon: Icon(Icons.receipt_long_rounded, color: AppColors.accent),
-              label: 'Logs',
-            ),
-            NavigationDestination(
-              icon: Icon(Icons.people_outline_rounded, color: AppColors.textSecondary),
-              selectedIcon: Icon(Icons.people_rounded, color: AppColors.accent),
-              label: 'Staff',
-            ),
-            NavigationDestination(
-              icon: Icon(Icons.settings_outlined, color: AppColors.textSecondary),
-              selectedIcon: Icon(Icons.settings_rounded, color: AppColors.accent),
-              label: 'Settings',
-            ),
-          ],
         ),
       ),
     );
   }
 
   Widget _buildAnimatedFeedback() {
-    final bool isSuccess = _attendanceFeedback!['isSuccess'];
+    final FeedbackType statusType = _attendanceFeedback!['statusType'] ?? FeedbackType.checkInSuccess;
     final String name = _attendanceFeedback!['name'];
     final String msg = _attendanceFeedback!['msg'];
     final DateTime time = _attendanceFeedback!['time'];
-    final Color color = isSuccess ? AppColors.success : AppColors.warning;
+
+    Color color;
+    IconData iconData;
+
+    switch (statusType) {
+      case FeedbackType.checkInSuccess:
+        color = AppColors.success; // Green Check In
+        iconData = Icons.check_circle_rounded;
+        break;
+      case FeedbackType.checkOutSuccess:
+        color = AppColors.error; // Red Check Out
+        iconData = Icons.check_circle_rounded;
+        break;
+      case FeedbackType.info:
+        color = const Color(0xFF0EA5E9);
+        iconData = Icons.verified_user_rounded;
+        break;
+      case FeedbackType.warning:
+        color = AppColors.warning;
+        iconData = Icons.info_outline_rounded;
+        break;
+    }
 
     return Center(
       child: Container(
@@ -1228,7 +1336,7 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
                 shape: BoxShape.circle,
               ),
               child: Icon(
-                isSuccess ? Icons.check_circle_rounded : Icons.info_outline_rounded,
+                iconData,
                 size: 36,
                 color: color,
               ),
@@ -1245,7 +1353,7 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
             ),
             const SizedBox(height: 4),
             Text(
-              "$msg\n${DateFormat('h:mm a').format(time)}",
+              "$msg\n${DateFormat('hh:mm a').format(time)}",
               textAlign: TextAlign.center,
               style: const TextStyle(color: AppColors.textSecondary, fontSize: 13, height: 1.3),
             ),
@@ -1254,6 +1362,13 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> with Widg
       ),
     );
   }
+}
+
+enum FeedbackType {
+  checkInSuccess,
+  checkOutSuccess,
+  info,
+  warning,
 }
 
 class _AiScannerReticlePainter extends CustomPainter {
@@ -1279,13 +1394,37 @@ class _AiScannerReticlePainter extends CustomPainter {
 
     // 4 Corner Brackets
     // Top-Left
-    canvas.drawPath(Path()..moveTo(center.dx - rInset, center.dy - rInset + bLen)..lineTo(center.dx - rInset, center.dy - rInset)..lineTo(center.dx - rInset + bLen, center.dy - rInset), bracketPaint);
+    canvas.drawPath(
+      Path()
+        ..moveTo(center.dx - rInset, center.dy - rInset + bLen)
+        ..lineTo(center.dx - rInset, center.dy - rInset)
+        ..lineTo(center.dx - rInset + bLen, center.dy - rInset),
+      bracketPaint,
+    );
     // Top-Right
-    canvas.drawPath(Path()..moveTo(center.dx + rInset, center.dy - rInset + bLen)..lineTo(center.dx + rInset, center.dy - rInset)..lineTo(center.dx + rInset - bLen, center.dy - rInset), bracketPaint);
+    canvas.drawPath(
+      Path()
+        ..moveTo(center.dx + rInset, center.dy - rInset + bLen)
+        ..lineTo(center.dx + rInset, center.dy - rInset)
+        ..lineTo(center.dx + rInset - bLen, center.dy - rInset),
+      bracketPaint,
+    );
     // Bottom-Left
-    canvas.drawPath(Path()..moveTo(center.dx - rInset, center.dy + rInset - bLen)..lineTo(center.dx - rInset, center.dy + rInset)..lineTo(center.dx - rInset + bLen, center.dy + rInset), bracketPaint);
+    canvas.drawPath(
+      Path()
+        ..moveTo(center.dx - rInset, center.dy + rInset - bLen)
+        ..lineTo(center.dx - rInset, center.dy + rInset)
+        ..lineTo(center.dx - rInset + bLen, center.dy + rInset),
+      bracketPaint,
+    );
     // Bottom-Right
-    canvas.drawPath(Path()..moveTo(center.dx + rInset, center.dy + rInset - bLen)..lineTo(center.dx + rInset, center.dy + rInset)..lineTo(center.dx + rInset - bLen, center.dy + rInset), bracketPaint);
+    canvas.drawPath(
+      Path()
+        ..moveTo(center.dx + rInset, center.dy + rInset - bLen)
+        ..lineTo(center.dx + rInset, center.dy + rInset)
+        ..lineTo(center.dx + rInset - bLen, center.dy + rInset),
+      bracketPaint,
+    );
 
     // Animated Scanning Beam
     final scanY = (center.dy - rInset) + (rInset * 2 * progress);

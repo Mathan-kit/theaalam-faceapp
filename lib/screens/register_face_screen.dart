@@ -4,14 +4,16 @@ import 'dart:math' as math;
 import 'dart:convert';
 import 'dart:io';
 import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:image/image.dart' as img;
 
+import 'package:google_fonts/google_fonts.dart';
 import '../config/api_config.dart';
 import '../services/ml_service.dart';
+import '../services/auth_service.dart';
 import '../theme/app_colors.dart';
 import '../utils/toast_util.dart';
+import '../widgets/app_background.dart';
 
 class RegisterFaceScreen extends StatefulWidget {
   final String? employeeName;
@@ -102,8 +104,7 @@ class _RegisterFaceScreenState extends State<RegisterFaceScreen> {
       }
 
       // 5. POST to API
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('auth_token') ?? '';
+      String token = await AuthService().getValidToken();
 
       final response = await http.post(
         Uri.parse('${ApiConfig.baseUrl}employees_update_vector'),
@@ -145,9 +146,9 @@ class _RegisterFaceScreenState extends State<RegisterFaceScreen> {
     final theme = Theme.of(context);
 
     return Scaffold(
-      backgroundColor: AppColors.background,
+      backgroundColor: Colors.transparent,
       appBar: AppBar(
-        backgroundColor: AppColors.surface,
+        backgroundColor: Colors.transparent,
         elevation: 0,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_rounded, color: AppColors.textPrimary),
@@ -155,13 +156,14 @@ class _RegisterFaceScreenState extends State<RegisterFaceScreen> {
         ),
         title: Text(
           'Biometric Enrollment',
-          style: theme.textTheme.titleLarge?.copyWith(
+          style: GoogleFonts.outfit(
             fontWeight: FontWeight.w700,
             color: AppColors.textPrimary,
           ),
         ),
       ),
-      body: SafeArea(
+      body: AppBackground(
+        child: SafeArea(
         child: SingleChildScrollView(
           padding: const EdgeInsets.symmetric(horizontal: 20.0, vertical: 16.0),
           child: Column(
@@ -369,6 +371,7 @@ class _RegisterFaceScreenState extends State<RegisterFaceScreen> {
               ),
               const SizedBox(height: 20),
             ],
+            ),
           ),
         ),
       ),

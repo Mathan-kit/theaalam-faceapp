@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
-import '../utils/toast_util.dart';
 import 'dart:convert';
 import 'package:intl/intl.dart';
 import '../config/api_config.dart';
 import '../theme/app_colors.dart';
+import '../services/auth_service.dart';
 
 class LogsScreen extends StatefulWidget {
   final String? token;
@@ -23,18 +24,60 @@ class _LogsScreenState extends State<LogsScreen> {
   String? _error;
   DateTime _selectedDate = DateTime.now();
 
+  // In-memory cache by date string for lightning fast switching
+  static final Map<String, Map<String, dynamic>> _cache = {};
+
   @override
   void initState() {
     super.initState();
-    _fetchLogs();
+    _loadFromCacheOrFetch();
   }
 
-  Future<void> _fetchLogs() async {
-    if (widget.token == null || widget.token!.isEmpty) {
+  @override
+  void didUpdateWidget(covariant LogsScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.token != widget.token && (widget.token?.isNotEmpty ?? false)) {
+      _fetchLogs(silent: false);
+    }
+  }
+
+  void _loadFromCacheOrFetch() {
+    final dateKey = DateFormat('yyyy-MM-dd').format(_selectedDate);
+    if (_cache.containsKey(dateKey)) {
+      final cached = _cache[dateKey]!;
       setState(() {
-        _error = 'No authentication token found.';
+        _allLogs = cached['logs'] ?? [];
+        _summary = cached['summary'];
+        _filterLogsByDate();
         _isLoading = false;
       });
+      // Fetch in background to keep fresh without blocking UI
+      _fetchLogs(silent: true);
+    } else {
+      _fetchLogs(silent: false);
+    }
+  }
+
+  Future<void> _fetchLogs({bool silent = false}) async {
+    if (!silent) {
+      setState(() {
+        _isLoading = true;
+        _error = null;
+      });
+    }
+
+    String authToken = widget.token ?? '';
+    if (authToken.isEmpty) {
+      authToken = await AuthService().getValidToken();
+    }
+
+    if (authToken.isEmpty) {
+      if (mounted) {
+        setState(() {
+          _error = 'No authentication token found.';
+          _isLoading = false;
+        });
+      }
       return;
     }
 
@@ -44,54 +87,59 @@ class _LogsScreenState extends State<LogsScreen> {
         Uri.parse('${ApiConfig.baseUrl}attendance_logs?date=$dateStr'),
         headers: {
           'Accept': 'application/json',
-          'Authorization': 'Bearer ${widget.token}',
+          'Authorization': 'Bearer $authToken',
         },
-      );
+      ).timeout(const Duration(seconds: 8));
 
       if (response.statusCode == 200 || response.statusCode == 201) {
         final resData = jsonDecode(response.body);
-        setState(() {
-          if (resData['data'] is Map) {
-            final present = resData['data']['present'] ?? [];
-            final absent = resData['data']['absent'] ?? [];
-            _allLogs = [...present, ...absent];
-          } else {
-            _allLogs = resData['data'] ?? [];
-          }
-          _summary = resData['summary'];
-          _filterLogsByDate();
-          _isLoading = false;
-        });  
-      } else {
-        String errorMessage = 'Failed to load logs';
-        try {
-          final resData = jsonDecode(response.body);
-          if (resData['message'] != null) {
-            errorMessage = resData['message'];
-          } else if (resData['error'] != null) {
-            errorMessage = resData['error'];
-          }
-        } catch (_) {}
-
-        if (mounted) {
-          ToastUtil.showError(context, errorMessage);
+        List<dynamic> logs = [];
+        if (resData['data'] is Map) {
+          final present = resData['data']['present'] ?? [];
+          final absent = resData['data']['absent'] ?? [];
+          logs = [...present, ...absent];
+        } else {
+          logs = resData['data'] ?? [];
         }
 
-        setState(() {
-          _error = errorMessage;
-          _isLoading = false;
-        });
+        final summary = resData['summary'];
+
+        // Save to cache for instant recall
+        _cache[dateStr] = {
+          'logs': logs,
+          'summary': summary,
+        };
+
+        if (mounted) {
+          setState(() {
+            _allLogs = logs;
+            _summary = summary;
+            _filterLogsByDate();
+            _isLoading = false;
+            _error = null;
+          });
+        }
+      } else {
+        if (!silent && mounted) {
+          String errorMessage = 'Failed to load logs';
+          try {
+            final resData = jsonDecode(response.body);
+            if (resData['message'] != null) errorMessage = resData['message'];
+          } catch (_) {}
+          setState(() {
+            _error = errorMessage;
+            _isLoading = false;
+          });
+        }
       }
     } catch (e) {
       debugPrint('Error fetching logs: $e');
-      String displayError = 'Cannot connect to server. Please check your internet connection.';
-      if (mounted) {
-        ToastUtil.showError(context, displayError);
+      if (!silent && mounted) {
+        setState(() {
+          _error = 'Connection timeout. Tap Refresh to retry.';
+          _isLoading = false;
+        });
       }
-      setState(() {
-        _error = displayError;
-        _isLoading = false;
-      });
     }
   }
 
@@ -128,9 +176,8 @@ class _LogsScreenState extends State<LogsScreen> {
     if (picked != null && picked != _selectedDate) {
       setState(() {
         _selectedDate = picked;
-        _isLoading = true;
       });
-      _fetchLogs();
+      _loadFromCacheOrFetch();
     }
   }
 
@@ -139,9 +186,8 @@ class _LogsScreenState extends State<LogsScreen> {
     if (newDate.isAfter(DateTime.now().add(const Duration(days: 1)))) return;
     setState(() {
       _selectedDate = newDate;
-      _isLoading = true;
     });
-    _fetchLogs();
+    _loadFromCacheOrFetch();
   }
 
   String _formatTime(dynamic timeVal) {
@@ -181,8 +227,6 @@ class _LogsScreenState extends State<LogsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
     return SafeArea(
       child: Column(
         children: [
@@ -194,29 +238,11 @@ class _LogsScreenState extends State<LogsScreen> {
               children: [
                 Row(
                   children: [
-                    Container(
+                    Image.asset(
+                      'assets/images/logo.png',
                       width: 38,
                       height: 38,
-                      padding: const EdgeInsets.all(6),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        shape: BoxShape.circle,
-                        border: Border.all(color: AppColors.border),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withValues(alpha: 0.04),
-                            blurRadius: 8,
-                          ),
-                        ],
-                      ),
-                      child: Image.asset(
-                        'assets/images/logo.png',
-                        errorBuilder: (context, error, stackTrace) => const Icon(
-                          Icons.fingerprint,
-                          color: AppColors.accent,
-                          size: 20,
-                        ),
-                      ),
+                      fit: BoxFit.contain,
                     ),
                     const SizedBox(width: 10),
                     Column(
@@ -224,15 +250,18 @@ class _LogsScreenState extends State<LogsScreen> {
                       children: [
                         Text(
                           'Attendance Analytics',
-                          style: theme.textTheme.titleMedium?.copyWith(
+                          style: GoogleFonts.outfit(
                             fontWeight: FontWeight.w800,
+                            fontSize: 16,
                             color: AppColors.textPrimary,
                           ),
                         ),
                         Text(
                           'Daily Activity & Logs',
-                          style: theme.textTheme.labelSmall?.copyWith(
+                          style: GoogleFonts.outfit(
                             color: AppColors.textSecondary,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w500,
                           ),
                         ),
                       ],
@@ -240,21 +269,15 @@ class _LogsScreenState extends State<LogsScreen> {
                   ],
                 ),
                 IconButton(
-                  onPressed: () {
-                    setState(() {
-                      _isLoading = true;
-                      _error = null;
-                    });
-                    _fetchLogs();
-                  },
+                  onPressed: () => _fetchLogs(silent: false),
                   icon: const Icon(Icons.refresh_rounded, color: AppColors.textSecondary),
                   tooltip: 'Refresh',
                 ),
               ],
             ),
           ),
-          
-          // Date Navigator Widget
+
+          // Date Navigator
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 20.0),
             child: Container(
@@ -302,22 +325,37 @@ class _LogsScreenState extends State<LogsScreen> {
               ),
             ),
           ),
-          
-          // KPI Metric Summary Cards
+
+          // Gradient KPI Metric Summary Cards (Total, Present Green, Absent Red)
           if (_summary != null)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20.0, vertical: 12.0),
               child: Row(
                 children: [
-                  _buildKpiCard('Total', _summary!['total_active_employees']?.toString() ?? '0', AppColors.accent),
+                  _buildGradientKpiCard(
+                    title: 'Total',
+                    count: _summary!['total_active_employees']?.toString() ?? '0',
+                    gradientColors: [const Color(0xFF3B82F6), const Color(0xFF1D4ED8)],
+                    icon: Icons.people_alt_rounded,
+                  ),
                   const SizedBox(width: 10),
-                  _buildKpiCard('Present', _summary!['present_count']?.toString() ?? '0', AppColors.success),
+                  _buildGradientKpiCard(
+                    title: 'Present',
+                    count: _summary!['present_count']?.toString() ?? '0',
+                    gradientColors: [const Color(0xFF10B981), const Color(0xFF059669)],
+                    icon: Icons.check_circle_rounded,
+                  ),
                   const SizedBox(width: 10),
-                  _buildKpiCard('Absent', _summary!['absent_count']?.toString() ?? '0', AppColors.error),
+                  _buildGradientKpiCard(
+                    title: 'Absent',
+                    count: _summary!['absent_count']?.toString() ?? '0',
+                    gradientColors: [const Color(0xFFEF4444), const Color(0xFFDC2626)],
+                    icon: Icons.cancel_rounded,
+                  ),
                 ],
               ),
             ),
-            
+
           // Log List Content
           Expanded(
             child: _buildContent(),
@@ -327,7 +365,12 @@ class _LogsScreenState extends State<LogsScreen> {
     );
   }
 
-  Widget _buildKpiCard(String title, String count, Color color) {
+  Widget _buildGradientKpiCard({
+    required String title,
+    required String count,
+    required List<Color> gradientColors,
+    required IconData icon,
+  }) {
     final isSelected = _currentFilter == title;
     return Expanded(
       child: InkWell(
@@ -337,45 +380,61 @@ class _LogsScreenState extends State<LogsScreen> {
             _filterLogsByDate();
           });
         },
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(16),
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 180),
-          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 10),
+          padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 10),
           decoration: BoxDecoration(
-            color: isSelected ? color.withValues(alpha: 0.08) : AppColors.surface,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(
-              color: isSelected ? color : AppColors.border,
-              width: isSelected ? 1.8 : 1,
-            ),
-            boxShadow: isSelected
-                ? [
-                    BoxShadow(
-                      color: color.withValues(alpha: 0.12),
-                      blurRadius: 8,
-                      offset: const Offset(0, 2),
-                    ),
-                  ]
+            gradient: isSelected
+                ? LinearGradient(
+                    colors: gradientColors,
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  )
                 : null,
+            color: isSelected ? null : AppColors.surface,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: isSelected ? Colors.transparent : gradientColors.first.withValues(alpha: 0.35),
+              width: 1.5,
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: gradientColors.first.withValues(alpha: isSelected ? 0.3 : 0.05),
+                blurRadius: isSelected ? 12 : 4,
+                offset: const Offset(0, 4),
+              ),
+            ],
           ),
           child: Column(
             children: [
-              Text(
-                count,
-                style: TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.w800,
-                  color: isSelected ? color : AppColors.textPrimary,
-                ),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(
+                    icon,
+                    size: 15,
+                    color: isSelected ? Colors.white : gradientColors.first,
+                  ),
+                  const SizedBox(width: 5),
+                  Text(
+                    count,
+                    style: TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w800,
+                      color: isSelected ? Colors.white : gradientColors.first,
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(height: 2),
+              const SizedBox(height: 3),
               Text(
                 title.toUpperCase(),
                 style: TextStyle(
                   fontSize: 11,
-                  color: isSelected ? color : AppColors.textSecondary,
+                  color: isSelected ? Colors.white.withValues(alpha: 0.9) : AppColors.textSecondary,
                   fontWeight: FontWeight.w700,
-                  letterSpacing: 0.5,
+                  letterSpacing: 0.6,
                 ),
               ),
             ],
@@ -404,7 +463,7 @@ class _LogsScreenState extends State<LogsScreen> {
             children: [
               Container(
                 padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
+                decoration: const BoxDecoration(
                   color: AppColors.errorLight,
                   shape: BoxShape.circle,
                 ),
@@ -418,15 +477,9 @@ class _LogsScreenState extends State<LogsScreen> {
               ),
               const SizedBox(height: 16),
               ElevatedButton.icon(
-                onPressed: () {
-                  setState(() {
-                    _isLoading = true;
-                    _error = null;
-                  });
-                  _fetchLogs();
-                },
+                onPressed: () => _fetchLogs(silent: false),
                 icon: const Icon(Icons.refresh_rounded, size: 18),
-                label: const Text('Try Again'),
+                label: const Text('Refresh'),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: AppColors.accent,
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -445,21 +498,21 @@ class _LogsScreenState extends State<LogsScreen> {
           children: [
             Container(
               padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
+              decoration: const BoxDecoration(
                 color: AppColors.surfaceSubtle,
                 shape: BoxShape.circle,
               ),
               child: const Icon(Icons.history_toggle_off_rounded, size: 40, color: AppColors.textMuted),
             ),
             const SizedBox(height: 14),
-            Text(
+            const Text(
               'No attendance logs recorded',
               style: TextStyle(color: AppColors.textPrimary, fontWeight: FontWeight.w600, fontSize: 15),
             ),
             const SizedBox(height: 4),
             Text(
               DateFormat('MMMM dd, yyyy').format(_selectedDate),
-              style: TextStyle(color: AppColors.textSecondary, fontSize: 13),
+              style: const TextStyle(color: AppColors.textSecondary, fontSize: 13),
             ),
           ],
         ),
@@ -471,45 +524,72 @@ class _LogsScreenState extends State<LogsScreen> {
       itemCount: _filteredLogs.length,
       itemBuilder: (context, index) {
         final log = _filteredLogs[index];
-        final String name = (log['employee'] != null ? log['employee']['employee_name']?.toString() : null) 
-                            ?? log['employee_name']?.toString()
-                            ?? log['emp_code']?.toString() 
-                            ?? log['name']?.toString() 
-                            ?? 'Unknown Employee';
-        
+        final String name = (log['employee'] != null ? log['employee']['employee_name']?.toString() : null)
+            ?? log['employee_name']?.toString()
+            ?? log['emp_code']?.toString()
+            ?? log['name']?.toString()
+            ?? 'Unknown Employee';
+
         final inTimeStr = _formatTime(log['in_time'] ?? log['in_punch'] ?? log['check_in']);
         final outTimeStr = _formatTime(log['out_time'] ?? log['out_punch'] ?? log['check_out']);
 
-        final rawStatus = log['status']?.toString() ?? (log['p_flg'] == 1 ? 'Active' : 'Absent');
+        final rawStatus = log['status']?.toString() ?? (log['p_flg'] == 1 ? 'Present' : 'Absent');
         final bool isAbsent = rawStatus.toLowerCase() == 'absent' || log['p_flg'] == 0;
-        final status = isAbsent ? 'Absent' : (rawStatus.toLowerCase() == 'present' ? 'Active' : rawStatus);
+        final status = isAbsent ? 'Absent' : 'Present';
 
-        return Card(
-          elevation: 0,
-          margin: const EdgeInsets.only(bottom: 10),
-          shape: RoundedRectangleBorder(
+        // Green-White gradient for Present, Red-White gradient for Absent
+        final List<Color> cardGradient = isAbsent
+            ? [const Color(0xFFFFF1F2), const Color(0xFFFFFFFF)] // Lite Red to White
+            : [const Color(0xFFECFDF5), const Color(0xFFFFFFFF)]; // Lite Green to White
+
+        final Color themeColor = isAbsent ? const Color(0xFFEF4444) : const Color(0xFF10B981);
+        final Color themeColorDark = isAbsent ? const Color(0xFFDC2626) : const Color(0xFF059669);
+
+        return Container(
+          margin: const EdgeInsets.only(bottom: 12),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              colors: cardGradient,
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
             borderRadius: BorderRadius.circular(16),
-            side: const BorderSide(color: AppColors.border, width: 1),
+            border: Border.all(
+              color: themeColor.withValues(alpha: 0.3),
+              width: 1.2,
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: themeColor.withValues(alpha: 0.08),
+                blurRadius: 10,
+                offset: const Offset(0, 3),
+              ),
+            ],
           ),
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
             child: Row(
               children: [
-                // History Circle Icon
+                // Avatar Circle Icon (Green for Present, Red for Absent)
                 Container(
-                  width: 44,
-                  height: 44,
+                  width: 42,
+                  height: 42,
                   decoration: BoxDecoration(
-                    color: isAbsent ? AppColors.errorLight : AppColors.accentLight,
+                    color: themeColor.withValues(alpha: 0.14),
                     shape: BoxShape.circle,
+                    border: Border.all(
+                      color: themeColor.withValues(alpha: 0.25),
+                      width: 1,
+                    ),
                   ),
                   child: Icon(
-                    Icons.history_rounded,
-                    color: isAbsent ? AppColors.error : AppColors.accent,
+                    isAbsent ? Icons.person_off_rounded : Icons.person_rounded,
+                    color: themeColorDark,
                     size: 22,
                   ),
                 ),
-                const SizedBox(width: 14),
+                const SizedBox(width: 12),
+
                 // Name and In/Out Times
                 Expanded(
                   child: Column(
@@ -517,44 +597,79 @@ class _LogsScreenState extends State<LogsScreen> {
                     children: [
                       Text(
                         name,
-                        style: const TextStyle(
+                        style: GoogleFonts.outfit(
                           fontWeight: FontWeight.w700,
                           fontSize: 15,
                           color: AppColors.textPrimary,
                         ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                       ),
                       const SizedBox(height: 6),
                       Row(
                         children: [
-                          // In Time
-                          const Icon(
-                            Icons.login_rounded,
-                            size: 14,
-                            color: AppColors.success,
-                          ),
-                          const SizedBox(width: 4),
-                          Text(
-                            inTimeStr,
-                            style: const TextStyle(
-                              color: AppColors.success,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w700,
+                          // In Time Badge (Green)
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFD1FAE5), // Light Green Pill
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(
+                                color: const Color(0xFF10B981).withValues(alpha: 0.3),
+                                width: 0.8,
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(
+                                  Icons.login_rounded,
+                                  size: 13,
+                                  color: Color(0xFF047857),
+                                ),
+                                const SizedBox(width: 4),
+                                Text(
+                                  inTimeStr,
+                                  style: GoogleFonts.outfit(
+                                    color: const Color(0xFF047857),
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
-                          const SizedBox(width: 14),
-                          // Out Time
-                          const Icon(
-                            Icons.logout_rounded,
-                            size: 14,
-                            color: AppColors.error,
-                          ),
-                          const SizedBox(width: 4),
-                          Text(
-                            outTimeStr,
-                            style: const TextStyle(
-                              color: AppColors.error,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w700,
+                          const SizedBox(width: 8),
+
+                          // Out Time Badge (Red)
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFFEE2E2), // Light Red Pill
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(
+                                color: const Color(0xFFEF4444).withValues(alpha: 0.3),
+                                width: 0.8,
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(
+                                  Icons.logout_rounded,
+                                  size: 13,
+                                  color: Color(0xFFB91C1C),
+                                ),
+                                const SizedBox(width: 4),
+                                Text(
+                                  outTimeStr,
+                                  style: GoogleFonts.outfit(
+                                    color: const Color(0xFFB91C1C),
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
                         ],
@@ -562,19 +677,26 @@ class _LogsScreenState extends State<LogsScreen> {
                     ],
                   ),
                 ),
-                // Status Badge
+                const SizedBox(width: 8),
+
+                // Status Badge (Green Present / Red Absent)
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                   decoration: BoxDecoration(
-                    color: isAbsent ? AppColors.errorLight : AppColors.successLight,
+                    color: isAbsent ? const Color(0xFFFEE2E2) : const Color(0xFFD1FAE5),
                     borderRadius: BorderRadius.circular(20),
+                    border: Border.all(
+                      color: themeColor.withValues(alpha: 0.4),
+                      width: 1,
+                    ),
                   ),
                   child: Text(
                     status,
-                    style: TextStyle(
-                      color: isAbsent ? AppColors.error : AppColors.success,
+                    style: GoogleFonts.outfit(
+                      color: themeColorDark,
                       fontSize: 11,
-                      fontWeight: FontWeight.w700,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 0.3,
                     ),
                   ),
                 ),

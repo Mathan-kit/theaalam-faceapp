@@ -1,16 +1,14 @@
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'theme/app_theme.dart';
-import 'screens/login_screen.dart';
 import 'screens/face_recognition_screen.dart';
+
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
   final prefs = await SharedPreferences.getInstance();
-  final token = prefs.getString('auth_token');
-  
-  runApp(FaceAttendanceApp(token: token));
+  await prefs.remove('auth_token');
+  runApp(const FaceAttendanceApp());
 }
 
 class FaceAttendanceApp extends StatelessWidget {
@@ -20,11 +18,9 @@ class FaceAttendanceApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'ABN',
+      title: 'The Aalam Attendance',
       theme: AppTheme.theme,
-      home: token != null && token!.isNotEmpty 
-          ? FaceRecognitionScreen(token: token!) 
-          : const LoginScreen(),
+      home: FaceRecognitionScreen(token: token ?? ''),
       debugShowCheckedModeBanner: false,
     );
   }

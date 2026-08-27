@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
 import '../utils/toast_util.dart';
 import 'dart:convert';
 import '../config/api_config.dart';
 import '../theme/app_colors.dart';
+import '../services/auth_service.dart';
 import 'register_face_screen.dart';
 
 class StaffScreen extends StatefulWidget {
@@ -20,13 +22,20 @@ class _StaffScreenState extends State<StaffScreen> {
   List<dynamic> _filteredStaffList = [];
   String? _error;
   final TextEditingController _searchController = TextEditingController();
-  String _selectedFilter = 'All';
 
   @override
   void initState() {
     super.initState();
     _fetchStaff();
     _searchController.addListener(_filterStaff);
+  }
+
+  @override
+  void didUpdateWidget(covariant StaffScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.token != widget.token && widget.token.isNotEmpty) {
+      _fetchStaff();
+    }
   }
 
   @override
@@ -39,35 +48,31 @@ class _StaffScreenState extends State<StaffScreen> {
     final query = _searchController.text.toLowerCase().trim();
     setState(() {
       _filteredStaffList = _staffList.where((staff) {
+        final bool isActive = staff['status'] == 'Active' || staff['status'] == 'active' || staff['status'] == 1 || staff['status'] == '1';
+        if (!isActive) return false;
+
         final name = (staff['employee_name'] ?? '').toString().toLowerCase();
         final code = (staff['emp_code'] ?? '').toString().toLowerCase();
         final category = (staff['employee_category'] ?? '').toString().toLowerCase();
         final bool matchesQuery = query.isEmpty || name.contains(query) || code.contains(query) || category.contains(query);
 
-        final bool isActive = staff['status'] == 'Active';
-        final hasFace = staff['face_vector'] != null && staff['face_vector'].toString().length > 10;
-
-        if (_selectedFilter == 'Active') {
-          return matchesQuery && isActive;
-        } else if (_selectedFilter == 'Inactive') {
-          return matchesQuery && !isActive;
-        } else if (_selectedFilter == 'Registered') {
-          return matchesQuery && hasFace;
-        } else if (_selectedFilter == 'Pending') {
-          return matchesQuery && !hasFace;
-        }
         return matchesQuery;
       }).toList();
     });
   }
 
   Future<void> _fetchStaff() async {
+    String authToken = widget.token;
+    if (authToken.isEmpty) {
+      authToken = await AuthService().getValidToken();
+    }
+
     try {
       final response = await http.get(
         Uri.parse('${ApiConfig.baseUrl}employees'),
         headers: {
           'Accept': 'application/json',
-          'Authorization': 'Bearer ${widget.token}',
+          'Authorization': 'Bearer $authToken',
         },
       );
 
@@ -75,9 +80,9 @@ class _StaffScreenState extends State<StaffScreen> {
         final resData = jsonDecode(response.body);
         setState(() {
           _staffList = resData['data'] ?? [];
-          _filteredStaffList = List.from(_staffList);
           _isLoading = false;
         });
+        _filterStaff();
       } else {
         String errorMessage = 'Failed to load staff';
         try {
@@ -126,29 +131,11 @@ class _StaffScreenState extends State<StaffScreen> {
               children: [
                 Row(
                   children: [
-                    Container(
+                    Image.asset(
+                      'assets/images/logo.png',
                       width: 38,
                       height: 38,
-                      padding: const EdgeInsets.all(6),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        shape: BoxShape.circle,
-                        border: Border.all(color: AppColors.border),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withValues(alpha: 0.04),
-                            blurRadius: 8,
-                          ),
-                        ],
-                      ),
-                      child: Image.asset(
-                        'assets/images/logo.png',
-                        errorBuilder: (context, error, stackTrace) => const Icon(
-                          Icons.fingerprint,
-                          color: AppColors.accent,
-                          size: 20,
-                        ),
-                      ),
+                      fit: BoxFit.contain,
                     ),
                     const SizedBox(width: 10),
                     Column(
@@ -156,15 +143,18 @@ class _StaffScreenState extends State<StaffScreen> {
                       children: [
                         Text(
                           'Staff Directory',
-                          style: theme.textTheme.titleMedium?.copyWith(
+                          style: GoogleFonts.outfit(
                             fontWeight: FontWeight.w800,
+                            fontSize: 16,
                             color: AppColors.textPrimary,
                           ),
                         ),
                         Text(
-                          '${_staffList.length} Total Employees',
-                          style: theme.textTheme.labelSmall?.copyWith(
+                          '${_filteredStaffList.length} Active Employees',
+                          style: GoogleFonts.outfit(
                             color: AppColors.textSecondary,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w500,
                           ),
                         ),
                       ],
@@ -192,7 +182,7 @@ class _StaffScreenState extends State<StaffScreen> {
             child: TextField(
               controller: _searchController,
               decoration: InputDecoration(
-                hintText: 'Search by name, code or category...',
+                hintText: 'Search active staff by name, code...',
                 prefixIcon: const Icon(Icons.search_rounded, color: AppColors.textSecondary, size: 20),
                 suffixIcon: _searchController.text.isNotEmpty
                     ? IconButton(
@@ -206,44 +196,6 @@ class _StaffScreenState extends State<StaffScreen> {
             ),
           ),
           const SizedBox(height: 12),
-
-          // Filter Chips
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 20.0),
-            child: Row(
-              children: ['All', 'Active', 'Inactive', 'Registered', 'Pending'].map((filter) {
-                final isSelected = _selectedFilter == filter;
-                return Padding(
-                  padding: const EdgeInsets.only(right: 8.0),
-                  child: FilterChip(
-                    label: Text(filter),
-                    selected: isSelected,
-                    onSelected: (selected) {
-                      setState(() {
-                        _selectedFilter = filter;
-                      });
-                      _filterStaff();
-                    },
-                    backgroundColor: AppColors.surface,
-                    selectedColor: AppColors.accentLight,
-                    side: BorderSide(
-                      color: isSelected ? AppColors.accent : AppColors.border,
-                      width: 1,
-                    ),
-                    labelStyle: TextStyle(
-                      color: isSelected ? AppColors.accent : AppColors.textSecondary,
-                      fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
-                      fontSize: 12,
-                    ),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                    showCheckmark: false,
-                  ),
-                );
-              }).toList(),
-            ),
-          ),
-          const SizedBox(height: 8),
           
           // Staff List Content
           Expanded(
@@ -492,13 +444,13 @@ class _StaffScreenState extends State<StaffScreen> {
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             Icon(
-                              hasFaceVector ? Icons.sync_rounded : Icons.add_a_photo_outlined,
+                              hasFaceVector ? Icons.edit_rounded : Icons.add_a_photo_outlined,
                               size: 14,
                               color: AppColors.accent,
                             ),
                             const SizedBox(width: 6),
                             Text(
-                              hasFaceVector ? 'Update Biometrics' : 'Enroll Face',
+                              hasFaceVector ? 'Update Face' : 'Enroll Face',
                               style: const TextStyle(
                                 color: AppColors.accent,
                                 fontSize: 12,
