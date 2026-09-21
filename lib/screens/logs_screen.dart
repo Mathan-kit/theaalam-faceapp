@@ -9,7 +9,13 @@ import '../services/auth_service.dart';
 
 class LogsScreen extends StatefulWidget {
   final String? token;
-  const LogsScreen({super.key, this.token});
+  final VoidCallback? onLogout;
+
+  const LogsScreen({
+    super.key,
+    this.token,
+    this.onLogout,
+  });
 
   @override
   State<LogsScreen> createState() => _LogsScreenState();
@@ -228,6 +234,7 @@ class _LogsScreenState extends State<LogsScreen> {
   @override
   Widget build(BuildContext context) {
     return SafeArea(
+      bottom: false,
       child: Column(
         children: [
           // Header Bar
@@ -268,10 +275,21 @@ class _LogsScreenState extends State<LogsScreen> {
                     ),
                   ],
                 ),
-                IconButton(
-                  onPressed: () => _fetchLogs(silent: false),
-                  icon: const Icon(Icons.refresh_rounded, color: AppColors.textSecondary),
-                  tooltip: 'Refresh',
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      onPressed: () => _fetchLogs(silent: false),
+                      icon: const Icon(Icons.refresh_rounded, color: AppColors.textSecondary),
+                      tooltip: 'Refresh',
+                    ),
+                    if (widget.onLogout != null)
+                      IconButton(
+                        onPressed: widget.onLogout,
+                        icon: const Icon(Icons.logout_rounded, color: AppColors.error),
+                        tooltip: 'Logout',
+                      ),
+                  ],
                 ),
               ],
             ),
@@ -520,7 +538,8 @@ class _LogsScreenState extends State<LogsScreen> {
     }
 
     return ListView.builder(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+      physics: const BouncingScrollPhysics(),
+      padding: const EdgeInsets.only(left: 20, right: 20, top: 8, bottom: 20),
       itemCount: _filteredLogs.length,
       itemBuilder: (context, index) {
         final log = _filteredLogs[index];

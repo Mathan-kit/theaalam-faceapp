@@ -37,54 +37,45 @@ class CustomBottomNavBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final bottomPadding = MediaQuery.of(context).padding.bottom;
+    final double barHeight = 64.0 + (bottomPadding > 0 ? bottomPadding : 8.0);
 
-    return Padding(
-      padding: EdgeInsets.only(
-        left: 16.0,
-        right: 16.0,
-        bottom: bottomPadding > 0 ? bottomPadding + 10.0 : 20.0,
+    return Container(
+      width: double.infinity,
+      height: barHeight,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(22)),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFFD97706).withValues(alpha: 0.12),
+            blurRadius: 18,
+            offset: const Offset(0, -3),
+          ),
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.05),
+            blurRadius: 6,
+            offset: const Offset(0, -1),
+          ),
+        ],
+        border: const Border(
+          top: BorderSide(
+            color: Color(0xFFEFE6D8),
+            width: 1.2,
+          ),
+        ),
       ),
-      child: SizedBox(
-        height: 66,
+      child: ClipRRect(
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(22)),
         child: Stack(
-          clipBehavior: Clip.none,
           alignment: Alignment.bottomCenter,
           children: [
-            // 1. Background Rounded Card Container
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
-              height: 56,
-              child: Container(
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(
-                    color: const Color(0xFFEFE6D8),
-                    width: 1.2,
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: const Color(0xFFD97706).withValues(alpha: 0.09),
-                      blurRadius: 18,
-                      offset: const Offset(0, 4),
-                    ),
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.04),
-                      blurRadius: 6,
-                      offset: const Offset(0, 2),
-                    ),
-                  ],
-                ),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(18.8),
-                  child: Image.asset(
-                    'assets/images/bottomenubavckgroud.png',
-                    fit: BoxFit.cover,
-                    errorBuilder: (context, error, stackTrace) => Container(
-                      color: Colors.white,
-                    ),
-                  ),
+            // 1. Background Image spanning edge-to-edge
+            Positioned.fill(
+              child: Image.asset(
+                'assets/images/bottomenubavckgroud.png',
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) => Container(
+                  color: Colors.white,
                 ),
               ),
             ),
@@ -93,8 +84,8 @@ class CustomBottomNavBar extends StatelessWidget {
             Positioned(
               left: 0,
               right: 0,
-              bottom: 0,
-              height: 66,
+              top: 0,
+              bottom: bottomPadding > 0 ? bottomPadding : 4.0,
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: List.generate(_items.length, (index) {
@@ -109,7 +100,7 @@ class CustomBottomNavBar extends StatelessWidget {
                             behavior: HitTestBehavior.opaque,
                             onTap: () => onItemSelected(index),
                             child: SizedBox(
-                              height: 66,
+                              height: 60,
                               child: isSelected
                                   ? _buildActiveItem(item)
                                   : _buildInactiveItem(item),
@@ -121,9 +112,9 @@ class CustomBottomNavBar extends StatelessWidget {
                             !isSelected &&
                             selectedIndex != index + 1)
                           Container(
-                            height: 24,
+                            height: 22,
                             width: 1,
-                            margin: const EdgeInsets.only(bottom: 16),
+                            margin: const EdgeInsets.only(bottom: 14),
                             color: const Color(0xFFE5D7C5),
                           )
                         else if (index < _items.length - 1)
@@ -271,6 +262,7 @@ class _HouseTabPainter extends CustomPainter {
     borderPath.lineTo(cornerR + inset, h - inset);
     borderPath.quadraticBezierTo(inset, h - inset, inset, h - cornerR - inset);
     borderPath.lineTo(inset, peakOffset + 12 + inset);
+    
     borderPath.quadraticBezierTo(inset, peakOffset + 6 + inset, cornerR + inset, peakOffset + 4 + inset);
     borderPath.close();
 

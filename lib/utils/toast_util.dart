@@ -30,13 +30,13 @@ class ToastUtil {
             ),
             boxShadow: [
               BoxShadow(
-                color: (isError ? Colors.red : Colors.green).withOpacity(0.15),
+                color: (isError ? Colors.red : Colors.green).withValues(alpha: 0.15),
                 blurRadius: 8,
                 offset: const Offset(0, 4),
               )
             ],
             border: Border.all(
-              color: (isError ? Colors.red : Colors.green).withOpacity(0.3),
+              color: (isError ? Colors.red : Colors.green).withValues(alpha: 0.3),
               width: 1,
             ),
           ),

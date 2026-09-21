@@ -62,6 +62,21 @@ class AuthService {
     return null;
   }
 
+  Future<String?> getAdminName() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('admin_name');
+  }
+
+  Future<String?> getAdminRole() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('admin_role');
+  }
+
+  Future<bool> isLoggedIn() async {
+    final token = await getValidToken();
+    return token.isNotEmpty;
+  }
+
   Future<void> logout() async {
     _cachedToken = null;
     final prefs = await SharedPreferences.getInstance();

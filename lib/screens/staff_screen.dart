@@ -10,7 +10,13 @@ import 'register_face_screen.dart';
 
 class StaffScreen extends StatefulWidget {
   final String token;
-  const StaffScreen({super.key, required this.token});
+  final VoidCallback? onLogout;
+
+  const StaffScreen({
+    super.key,
+    required this.token,
+    this.onLogout,
+  });
 
   @override
   State<StaffScreen> createState() => _StaffScreenState();
@@ -121,6 +127,7 @@ class _StaffScreenState extends State<StaffScreen> {
     final theme = Theme.of(context);
     
     return SafeArea(
+      bottom: false,
       child: Column(
         children: [
           // Header Bar
@@ -161,16 +168,27 @@ class _StaffScreenState extends State<StaffScreen> {
                     ),
                   ],
                 ),
-                IconButton(
-                  onPressed: () {
-                    setState(() {
-                      _isLoading = true;
-                      _error = null;
-                    });
-                    _fetchStaff();
-                  },
-                  icon: const Icon(Icons.refresh_rounded, color: AppColors.textSecondary),
-                  tooltip: 'Refresh',
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      onPressed: () {
+                        setState(() {
+                          _isLoading = true;
+                          _error = null;
+                        });
+                        _fetchStaff();
+                      },
+                      icon: const Icon(Icons.refresh_rounded, color: AppColors.textSecondary),
+                      tooltip: 'Refresh',
+                    ),
+                    if (widget.onLogout != null)
+                      IconButton(
+                        onPressed: widget.onLogout,
+                        icon: const Icon(Icons.logout_rounded, color: AppColors.error),
+                        tooltip: 'Logout',
+                      ),
+                  ],
                 ),
               ],
             ),
@@ -283,7 +301,8 @@ class _StaffScreenState extends State<StaffScreen> {
     }
 
     return ListView.builder(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+      physics: const BouncingScrollPhysics(),
+      padding: const EdgeInsets.only(left: 20, right: 20, top: 8, bottom: 20),
       itemCount: _filteredStaffList.length,
       itemBuilder: (context, index) {
         final staff = _filteredStaffList[index];

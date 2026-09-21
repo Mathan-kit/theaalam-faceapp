@@ -79,6 +79,7 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen>
   late AnimationController _fingerTapController;
   late Animation<double> _fingerTapScaleAnimation;
   String _authToken = '';
+  String? _adminName;
 
   // Safe base URL helper to prevent 404 errors missing the slash
   String get safeBaseUrl {
@@ -89,6 +90,7 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen>
   void initState() {
     super.initState();
     _authToken = widget.token;
+    _loadAdminInfo();
     WidgetsBinding.instance.addObserver(this);
     _scannerAnimController = AnimationController(
       vsync: this,
@@ -119,6 +121,105 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen>
     MLService().initialize();
     _loadAuthorizedEmployees();
     _fetchTodayAttendanceLogs();
+  }
+
+  Future<void> _loadAdminInfo() async {
+    final token = await AuthService().getValidToken();
+    if (token.isNotEmpty) {
+      final name = await AuthService().getAdminName();
+      if (mounted) {
+        setState(() {
+          _authToken = token;
+          _adminName = name;
+        });
+      }
+    } else {
+      if (mounted) {
+        setState(() {
+          _authToken = '';
+          _adminName = null;
+        });
+      }
+    }
+  }
+
+  Future<void> _handleLogout() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        backgroundColor: Colors.white,
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: AppColors.error.withValues(alpha: 0.12),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.logout_rounded, color: AppColors.error, size: 22),
+            ),
+            const SizedBox(width: 12),
+            Text(
+              'Confirm Logout',
+              style: GoogleFonts.outfit(
+                fontWeight: FontWeight.w700,
+                fontSize: 18,
+                color: AppColors.textPrimary,
+              ),
+            ),
+          ],
+        ),
+        content: Text(
+          _adminName != null
+              ? 'Are you sure you want to log out ($_adminName)? You will need to log in again with credentials to access protected features.'
+              : 'Are you sure you want to log out of Admin mode? You will need to log in again with credentials to access protected features.',
+          style: GoogleFonts.outfit(
+            fontSize: 14,
+            color: AppColors.textSecondary,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text(
+              'Cancel',
+              style: GoogleFonts.outfit(
+                fontWeight: FontWeight.w600,
+                color: AppColors.textSecondary,
+              ),
+            ),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.error,
+              foregroundColor: Colors.white,
+              elevation: 0,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            ),
+            child: Text(
+              'Logout',
+              style: GoogleFonts.outfit(
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      await AuthService().logout();
+      if (!mounted) return;
+      setState(() {
+        _authToken = '';
+        _adminName = null;
+        _currentIndex = 0;
+      });
+      ToastUtil.showSuccess(context, 'Logged out successfully');
+    }
   }
 
   void _checkAndResetDailyData() {
@@ -695,7 +796,8 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen>
 
     return SafeArea(
       child: SingleChildScrollView(
-        padding: const EdgeInsets.symmetric(horizontal: 20.0, vertical: 16.0),
+        physics: const BouncingScrollPhysics(),
+        padding: const EdgeInsets.only(left: 20.0, right: 20.0, top: 16.0, bottom: 20.0),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -737,36 +839,81 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen>
                   ],
                 ),
 
-                // Live Clock / Live Badge
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: AppColors.surface,
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(color: AppColors.border),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Container(
-                        width: 7,
-                        height: 7,
-                        decoration: BoxDecoration(
-                          color: _isCameraActive ? AppColors.success : AppColors.textMuted,
-                          shape: BoxShape.circle,
-                        ),
+                // Live Clock / Live Badge & Logout
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                      decoration: BoxDecoration(
+                        color: AppColors.surface,
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: AppColors.border),
                       ),
-                      const SizedBox(width: 6),
-                      Text(
-                        _isCameraActive ? 'Scanning' : 'Standby',
-                        style: GoogleFonts.outfit(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w700,
-                          color: _isCameraActive ? AppColors.success : AppColors.textSecondary,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            width: 7,
+                            height: 7,
+                            decoration: BoxDecoration(
+                              color: _isCameraActive ? AppColors.success : AppColors.textMuted,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            _isCameraActive ? 'Scanning' : 'Standby',
+                            style: GoogleFonts.outfit(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                              color: _isCameraActive ? AppColors.success : AppColors.textSecondary,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (_authToken.isNotEmpty) ...[
+                      const SizedBox(width: 8),
+                      Material(
+                        color: Colors.transparent,
+                        child: Tooltip(
+                          message: _adminName != null ? 'Logged in as $_adminName - Tap to Logout' : 'Admin Mode - Tap to Logout',
+                          child: InkWell(
+                            onTap: _handleLogout,
+                            borderRadius: BorderRadius.circular(20),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                              decoration: BoxDecoration(
+                                color: AppColors.error.withValues(alpha: 0.1),
+                                borderRadius: BorderRadius.circular(20),
+                                border: Border.all(color: AppColors.error.withValues(alpha: 0.3)),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(
+                                    Icons.logout_rounded,
+                                    size: 14,
+                                    color: AppColors.error,
+                                  ),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    'Logout',
+                                    style: GoogleFonts.outfit(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w700,
+                                      color: AppColors.error,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
                         ),
                       ),
                     ],
-                  ),
+                  ],
                 ),
               ],
             ),
@@ -790,8 +937,8 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen>
               child: Row(
                 children: [
                   Container(
-                    width: 44,
-                    height: 44,
+                    width: 42,
+                    height: 42,
                     decoration: BoxDecoration(
                       color: AppColors.accent.withValues(alpha: 0.1),
                       shape: BoxShape.circle,
@@ -802,56 +949,59 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen>
                       size: 24,
                     ),
                   ),
-                  const SizedBox(width: 14),
+                  const SizedBox(width: 12),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
                       children: [
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text(
-                              'Attendance System Active',
-                              style: GoogleFonts.outfit(
-                                fontWeight: FontWeight.w700,
-                                fontSize: 14,
-                                color: AppColors.textPrimary,
-                              ),
-                            ),
-                            Text(
-                              timeString,
-                              style: GoogleFonts.outfit(
-                                fontWeight: FontWeight.w700,
-                                fontSize: 13,
-                                color: AppColors.accent,
-                              ),
-                            ),
-                          ],
+                        Text(
+                          'Attendance Active',
+                          style: GoogleFonts.outfit(
+                            fontWeight: FontWeight.w700,
+                            fontSize: 14,
+                            color: AppColors.textPrimary,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                         ),
                         const SizedBox(height: 2),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text(
-                              'Auto Check-In & Check-Out (30m Interval)',
-                              style: GoogleFonts.outfit(
-                                fontSize: 11,
-                                color: AppColors.textSecondary,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                            Text(
-                              dateString,
-                              style: GoogleFonts.outfit(
-                                fontSize: 10,
-                                color: AppColors.textMuted,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                          ],
+                        Text(
+                          'Auto Check-In & Out',
+                          style: GoogleFonts.outfit(
+                            fontSize: 11,
+                            color: AppColors.textSecondary,
+                            fontWeight: FontWeight.w500,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                         ),
                       ],
                     ),
+                  ),
+                  const SizedBox(width: 8),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        timeString,
+                        style: GoogleFonts.outfit(
+                          fontWeight: FontWeight.w700,
+                          fontSize: 13,
+                          color: AppColors.accent,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        dateString,
+                        style: GoogleFonts.outfit(
+                          fontSize: 10,
+                          color: AppColors.textMuted,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -1227,11 +1377,20 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen>
 
     Widget body;
     if (_currentIndex == 1) {
-      body = LogsScreen(token: _authToken);
+      body = LogsScreen(
+        token: _authToken,
+        onLogout: _handleLogout,
+      );
     } else if (_currentIndex == 2) {
-      body = StaffScreen(token: _authToken);
+      body = StaffScreen(
+        token: _authToken,
+        onLogout: _handleLogout,
+      );
     } else if (_currentIndex == 3) {
-      body = const SettingsScreen();
+      body = SettingsScreen(
+        token: _authToken,
+        onLogout: _handleLogout,
+      );
     } else {
       body = _buildHomeBody(theme);
     }
@@ -1239,20 +1398,23 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen>
     return AppBackground(
       child: Scaffold(
         backgroundColor: Colors.transparent,
-        extendBody: true,
-        body: Padding(
-          padding: const EdgeInsets.only(bottom: 76.0),
-          child: body,
-        ),
+        extendBody: false,
+        body: body,
         bottomNavigationBar: CustomBottomNavBar(
           selectedIndex: _currentIndex,
           onItemSelected: (index) async {
             if (index != 0) {
               if (_authToken.isEmpty) {
-                _authToken = await AuthService().getValidToken();
+                final token = await AuthService().getValidToken();
+                if (mounted && token.isNotEmpty) {
+                  setState(() {
+                    _authToken = token;
+                  });
+                  _loadAdminInfo();
+                }
               }
               if (_authToken.isEmpty) {
-                if (!mounted) return;
+                if (!context.mounted) return;
                 // Not authenticated as Admin -> Prompt Login Screen!
                 final dynamic result = await Navigator.push(
                   context,
@@ -1260,10 +1422,12 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen>
                     builder: (context) => const LoginScreen(isModal: true),
                   ),
                 );
+                if (!mounted) return;
                 if (result != null && result is String && result.isNotEmpty) {
                   setState(() {
                     _authToken = result;
                   });
+                  _loadAdminInfo();
                   _loadAuthorizedEmployees();
                   _fetchTodayAttendanceLogs();
                 } else {
