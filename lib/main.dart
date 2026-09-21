@@ -7,8 +7,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final prefs = await SharedPreferences.getInstance();
-  await prefs.remove('auth_token');
-  runApp(const FaceAttendanceApp());
+  final savedToken = prefs.getString('auth_token') ?? '';
+  runApp(FaceAttendanceApp(token: savedToken));
 }
 
 class FaceAttendanceApp extends StatelessWidget {

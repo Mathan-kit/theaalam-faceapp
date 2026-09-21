@@ -8,6 +8,7 @@ import 'dart:convert';
 import 'package:intl/intl.dart';
 import 'dart:async';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../config/api_config.dart';
 import '../services/ml_service.dart';
@@ -57,6 +58,9 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen>
     ),
   );
   List<Map<String, dynamic>> _authorizedEmployees = [];
+  static const String _tmpEmployeesCacheKey = 'tmp_authorized_employees';
+  Timer? _backgroundApiSyncTimer;
+  bool _isSyncingEmployees = false;
   final Map<String, DateTime> _lastScanCooldownMap = {};
   final Map<String, StaffAttendanceState> _staffDailyStatus = {};
   String _lastTrackedDate = '';
@@ -119,7 +123,7 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen>
     });
 
     MLService().initialize();
-    _loadAuthorizedEmployees();
+    _initEmployeesAndStartBackgroundSync();
     _fetchTodayAttendanceLogs();
   }
 
@@ -291,30 +295,104 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen>
     }
   }
 
-  Future<void> _loadAuthorizedEmployees() async {
-    final token = await _getAuthToken();
-    if (token.isEmpty) return;
+  /// Dual Check Part 1: Fast instant load from local TMP cache (0ms delay)
+  Future<void> _loadAuthorizedEmployeesFromTmp() async {
     try {
-      final response = await http.get(
-        Uri.parse('${safeBaseUrl}employees'),
-        headers: {'Accept': 'application/json', 'Authorization': 'Bearer $token'},
-      );
-      if (response.statusCode == 200 || response.statusCode == 201) {
-        final resData = jsonDecode(response.body);
-        final List<dynamic> data = resData['data'] ?? [];
-        _authorizedEmployees = data
+      final prefs = await SharedPreferences.getInstance();
+      final cachedJson = prefs.getString(_tmpEmployeesCacheKey);
+      if (cachedJson != null && cachedJson.isNotEmpty) {
+        final List<dynamic> decoded = jsonDecode(cachedJson);
+        final list = decoded
             .where((e) {
               final vec = e['face_vector'];
               return vec != null && vec != 'null' && vec != '[]' && vec.toString().length > 10;
             })
-            .map((e) => e as Map<String, dynamic>)
+            .map((e) => Map<String, dynamic>.from(e as Map))
             .toList();
 
-        debugPrint("Successfully loaded ${_authorizedEmployees.length} authorized employees into memory.");
+        if (list.isNotEmpty && mounted) {
+          setState(() {
+            _authorizedEmployees = list;
+          });
+          debugPrint("TMP Cache: Instantly loaded ${_authorizedEmployees.length} authorized employees.");
+        }
       }
     } catch (e) {
-      debugPrint("Failed to load authorized employees: $e");
+      debugPrint("Error loading TMP cache: $e");
     }
+  }
+
+  /// Dual Check Part 2: Background API sync - fetches latest data & updates TMP cache
+  Future<void> _syncAuthorizedEmployeesFromApi({bool silent = false}) async {
+    if (_isSyncingEmployees) return;
+    _isSyncingEmployees = true;
+
+    try {
+      final token = await _getAuthToken();
+      final headers = {
+        'Accept': 'application/json',
+        if (token.isNotEmpty) 'Authorization': 'Bearer $token',
+      };
+
+      final response = await http.get(
+        Uri.parse('${safeBaseUrl}employees'),
+        headers: headers,
+      ).timeout(const Duration(seconds: 15));
+
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        final resData = jsonDecode(response.body);
+        final List<dynamic> data = resData['data'] ?? [];
+        final parsedEmployees = data
+            .where((e) {
+              final vec = e['face_vector'];
+              return vec != null && vec != 'null' && vec != '[]' && vec.toString().length > 10;
+            })
+            .map((e) => Map<String, dynamic>.from(e as Map))
+            .toList();
+
+        if (mounted) {
+          setState(() {
+            _authorizedEmployees = parsedEmployees;
+          });
+        } else {
+          _authorizedEmployees = parsedEmployees;
+        }
+
+        // Save into TMP cache ("tem") for instant recall next time or offline
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(_tmpEmployeesCacheKey, jsonEncode(parsedEmployees));
+        debugPrint("API Sync: Successfully synced ${_authorizedEmployees.length} employees and updated TMP cache.");
+      } else {
+        debugPrint("API Sync: Server returned status ${response.statusCode}");
+      }
+    } catch (e) {
+      debugPrint("API Sync: Background fetch error: $e");
+    } finally {
+      _isSyncingEmployees = false;
+    }
+  }
+
+  /// Dual Check initializer: TMP first + API sync + starts continuous background timer
+  Future<void> _initEmployeesAndStartBackgroundSync() async {
+    // 1. Check TMP first (Instant recall)
+    await _loadAuthorizedEmployeesFromTmp();
+
+    // 2. Fetch fresh data from API in background
+    await _syncAuthorizedEmployeesFromApi(silent: _authorizedEmployees.isNotEmpty);
+
+    // 3. Start continuous background API sync timer
+    _startBackgroundApiSync();
+  }
+
+  /// Keep API syncing continuously in the background every 30 seconds
+  void _startBackgroundApiSync() {
+    _backgroundApiSyncTimer?.cancel();
+    _backgroundApiSyncTimer = Timer.periodic(const Duration(seconds: 30), (timer) {
+      if (mounted) {
+        _syncAuthorizedEmployeesFromApi(silent: true);
+        _fetchTodayAttendanceLogs();
+      }
+    });
   }
 
   Future<void> _initCamera() async {
@@ -372,6 +450,7 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen>
 
   @override
   void dispose() {
+    _backgroundApiSyncTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _scannerAnimController.dispose();
     _fingerTapController.dispose();
@@ -389,6 +468,10 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (_cameraController == null || !_cameraController!.value.isInitialized) {
       return;
+    }
+    if (state == AppLifecycleState.resumed) {
+      _syncAuthorizedEmployeesFromApi(silent: true);
+      _fetchTodayAttendanceLogs();
     }
     if (state == AppLifecycleState.inactive || state == AppLifecycleState.paused) {
       _cameraController?.stopImageStream();
@@ -455,7 +538,16 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen>
 
   void _findMatchingEmployee(List<double> vector) {
     if (_authorizedEmployees.isEmpty) {
-      debugPrint("Warning: No authorized employees loaded.");
+      debugPrint("Warning: No authorized employees loaded. Triggering dual sync...");
+      _loadAuthorizedEmployeesFromTmp();
+      _syncAuthorizedEmployeesFromApi(silent: true);
+
+      if (_lastUnknownFaceTime == null || DateTime.now().difference(_lastUnknownFaceTime!).inSeconds > 3) {
+        _lastUnknownFaceTime = DateTime.now();
+        if (mounted) {
+          ToastUtil.showError(context, "Syncing employee biometrics... Please wait.");
+        }
+      }
       return;
     }
 
@@ -1428,7 +1520,7 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen>
                     _authToken = result;
                   });
                   _loadAdminInfo();
-                  _loadAuthorizedEmployees();
+                  _syncAuthorizedEmployeesFromApi();
                   _fetchTodayAttendanceLogs();
                 } else {
                   // User cancelled / went back without logging in
@@ -1446,7 +1538,7 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen>
               _cameraTimeoutTimer?.cancel();
               _countdownTicker?.cancel();
             } else if (_currentIndex != 0 && index == 0) {
-              _loadAuthorizedEmployees();
+              _syncAuthorizedEmployeesFromApi();
               _fetchTodayAttendanceLogs();
             }
             setState(() {
